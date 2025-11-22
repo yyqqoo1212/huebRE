@@ -1,0 +1,16 @@
+asgiref==3.11.0
+boto3==1.41.1
+botocore==1.41.1
+Django==5.2.8
+django-cors-headers==4.9.0
+django-storages==1.14.6
+jmespath==1.0.1
+psycopg2-binary==2.9.11
+PyJWT==2.10.1
+PyMySQL==1.1.2
+python-dateutil==2.9.0.post0
+s3transfer==0.15.0
+six==1.17.0
+sqlparse==0.5.3
+tzdata==2025.2
+urllib3==2.5.0
