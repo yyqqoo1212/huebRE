@@ -25,6 +25,7 @@ urlpatterns = [
     path('api/users/', include('users.urls')),
     # 文件存储相关API（全局功能，供所有模块使用）
     path('api/files/upload', storage_views.upload_file, name='file-upload'),
+    path('api/files/upload-temp', storage_views.upload_temp_file, name='file-upload-temp'),
     path('api/files/get', storage_views.get_file, name='file-get'),
     path('api/files/download', storage_views.download_file, name='file-download'),
     path('api/files/delete', storage_views.delete_file, name='file-delete'),
