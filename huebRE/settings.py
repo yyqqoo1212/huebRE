@@ -46,7 +46,7 @@ def env_int(key: str, default: int) -> int:
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
+# 生产环境必须使用强随机密钥，不要使用默认值
 SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', 'django-insecure-pw^gfr(7ukiw%l@6&h+se-1+udczua98=kk3fdpk9#3a=tf-uq')
 
 # SECURITY WARNING: don't run with debug turned on in production!
