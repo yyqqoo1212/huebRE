@@ -99,12 +99,12 @@ def _serialize_user(user: User) -> Dict[str, Any]:
     if not avatar_url:
         avatar_url = _get_default_avatar(user)
     
-    # 如果avatar_url是object_key格式（以avatars/开头且不是完整URL），转换为URL
+    # 如果avatar_url是object_key格式（以avatars/开头且不是完整URL），直接生成URL
+    # 优化：不在调用get_file_url函数，检查文件是否存在，直接生成URL
     if avatar_url.startswith('avatars/') and not avatar_url.startswith('http'):
-        file_url = get_file_url(object_key=avatar_url)
-        if file_url:
-            avatar_url = file_url
-        # 如果获取URL失败，仍然返回object_key（前端可能需要处理）
+        endpoint = getattr(settings, 'AWS_S3_ENDPOINT_URL', 'http://localhost:9000').rstrip('/')
+        bucket_name = getattr(settings, 'AWS_STORAGE_BUCKET_NAME', 'onlinejudge')
+        avatar_url = f"{endpoint}/{bucket_name}/{avatar_url}"
     # 如果已经是完整URL，直接使用
     
     return {
@@ -267,7 +267,7 @@ def register(request):
     except OperationalError:
         # 数据库不存在或表不存在，尝试恢复
         try:
-            from huebonlinejudgeRE.settings import ensure_database_and_tables
+            from huebRE.settings import ensure_database_and_tables
             ensure_database_and_tables()
             # 恢复后重新检查
             if User.objects.filter(username=username).exists():
@@ -412,7 +412,7 @@ def login(request):
     except OperationalError:
         # 数据库不存在或表不存在，尝试恢复
         try:
-            from huebonlinejudgeRE.settings import ensure_database_and_tables
+            from huebRE.settings import ensure_database_and_tables
             ensure_database_and_tables()
             # 恢复后重新查询
             try:

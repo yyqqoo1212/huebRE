@@ -1,5 +1,5 @@
 """
-WSGI config for huebonlinejudgeRE project.
+WSGI config for huebRE project.
 
 It exposes the WSGI callable as a module-level variable named ``application``.
 
@@ -11,6 +11,6 @@ import os
 
 from django.core.wsgi import get_wsgi_application
 
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'huebonlinejudgeRE.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'huebRE.settings')
 
 application = get_wsgi_application()

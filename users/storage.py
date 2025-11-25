@@ -120,7 +120,7 @@ def upload_file_to_bucket(
         return False, error_msg, None
 
 
-def get_file_url(object_key: str, bucket_name: Optional[str] = None, expires_in: int = 3600) -> Optional[str]:
+def get_file_url(object_key: str, bucket_name: Optional[str] = None, expires_in: int = 3600, check_exists: bool = True) -> Optional[str]:
     """
     获取文件的访问URL
     
@@ -128,6 +128,7 @@ def get_file_url(object_key: str, bucket_name: Optional[str] = None, expires_in:
         object_key: 对象在bucket中的键（路径）
         bucket_name: bucket名称，如果为None则使用settings中的默认bucket
         expires_in: URL过期时间（秒），仅当使用预签名URL时有效
+        check_exists: 是否检查文件是否存在，默认为True
         
     Returns:
         Optional[str]: 文件URL，如果失败则返回None
@@ -136,9 +137,24 @@ def get_file_url(object_key: str, bucket_name: Optional[str] = None, expires_in:
         bucket_name = getattr(settings, 'AWS_STORAGE_BUCKET_NAME', 'onlinejudge')
     
     try:
+        # 无需检查文件是否存在
+        if not check_exists:
+            if getattr(settings, 'AWS_QUERYSTRING_AUTH', False):
+                # 需要预签名URL时候，必须使用客户端
+                s3_client = get_s3_client()
+                url = s3_client.generate_presigned_url(
+                    'get_object',
+                    Params={'Bucket': bucket_name, 'Key': object_key},
+                    ExpiresIn=expires_in
+                )
+                return url
+            else:
+                # 生成公开URL,直接生成URL，无需调用API
+                endpoint = settings.AWS_S3_ENDPOINT_URL.rstrip('/')
+
+        # 需要检查文件是否存在
         s3_client = get_s3_client()
         
-        # 检查文件是否存在
         try:
             s3_client.head_object(Bucket=bucket_name, Key=object_key)
         except ClientError as e:
@@ -147,7 +163,7 @@ def get_file_url(object_key: str, bucket_name: Optional[str] = None, expires_in:
             raise
         
         # 生成URL
-        if settings.AWS_QUERYSTRING_AUTH:
+        if getattr(settings, 'AWS_QUERYSTRING_AUTH', False):
             # 生成预签名URL
             url = s3_client.generate_presigned_url(
                 'get_object',
@@ -156,7 +172,7 @@ def get_file_url(object_key: str, bucket_name: Optional[str] = None, expires_in:
             )
         else:
             # 生成公开URL
-            endpoint = settings.AWS_S3_ENDPOINT_URL.rstrip('/')
+            endpoint = getattr(settings, 'AWS_S3_ENDPOINT_URL', 'http://localhost:9000').rstrip('/')
             url = f"{endpoint}/{bucket_name}/{object_key}"
         
         return url
