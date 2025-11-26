@@ -22,7 +22,10 @@ from users import views as storage_views
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+
+    # 用户相关API
     path('api/users/', include('users.urls')),
+    
     # 文件存储相关API（全局功能，供所有模块使用）
     path('api/files/upload', storage_views.upload_file, name='file-upload'),
     path('api/files/upload-temp', storage_views.upload_temp_file, name='file-upload-temp'),

@@ -38,9 +38,9 @@ def get_s3_client():
     """获取S3客户端（兼容MinIO）"""
     return boto3.client(
         's3',
-        endpoint_url=getattr(settings, 'AWS_S3_ENDPOINT_URL', 'http://localhost:9000'),
-        aws_access_key_id=getattr(settings, 'AWS_ACCESS_KEY_ID', 'minioadmin'),
-        aws_secret_access_key=getattr(settings, 'AWS_SECRET_ACCESS_KEY', 'minioadmin'),
+        endpoint_url=getattr(settings, 'AWS_S3_ENDPOINT_URL'),
+        aws_access_key_id=getattr(settings, 'AWS_ACCESS_KEY_ID'),
+        aws_secret_access_key=getattr(settings, 'AWS_SECRET_ACCESS_KEY'),
         use_ssl=getattr(settings, 'AWS_S3_USE_SSL', False),
         verify=getattr(settings, 'AWS_S3_VERIFY', False),
     )
@@ -102,7 +102,7 @@ def upload_file_to_bucket(
             )
         else:
             # 生成公开URL
-            endpoint = getattr(settings, 'AWS_S3_ENDPOINT_URL', 'http://localhost:9000').rstrip('/')
+            endpoint = getattr(settings, 'AWS_S3_ENDPOINT_URL').rstrip('/')
             url = f"{endpoint}/{bucket_name}/{object_key}"
         
         return True, "文件上传成功", url
@@ -172,7 +172,7 @@ def get_file_url(object_key: str, bucket_name: Optional[str] = None, expires_in:
             )
         else:
             # 生成公开URL
-            endpoint = getattr(settings, 'AWS_S3_ENDPOINT_URL', 'http://localhost:9000').rstrip('/')
+            endpoint = getattr(settings, 'AWS_S3_ENDPOINT_URL').rstrip('/')
             url = f"{endpoint}/{bucket_name}/{object_key}"
         
         return url
@@ -204,13 +204,13 @@ def download_file_from_bucket(object_key: str, bucket_name: Optional[str] = None
         # 获取文件内容
         file_content = response['Body'].read()
         
-        # 获取Content-Type
+        # 获取 Content-Type
         content_type = response.get('ContentType', 'application/octet-stream')
         
         # 获取文件名
         filename = os.path.basename(object_key)
         
-        # 创建HttpResponse
+        # 创建 HttpResponse
         http_response = HttpResponse(file_content, content_type=content_type)
         http_response['Content-Disposition'] = f'attachment; filename="{filename}"'
         http_response['Content-Length'] = len(file_content)
@@ -302,31 +302,6 @@ def move_file_in_bucket(
         return False, error_msg
 
 
-def delete_file_from_bucket(object_key: str, bucket_name: Optional[str] = None) -> Tuple[bool, str]:
-    """
-    从bucket删除文件
-    
-    Args:
-        object_key: 对象在bucket中的键（路径）
-        bucket_name: bucket名称，如果为None则使用settings中的默认bucket
-        
-    Returns:
-        Tuple[bool, str]: (是否成功, 消息)
-    """
-    if bucket_name is None:
-        bucket_name = getattr(settings, 'AWS_STORAGE_BUCKET_NAME', 'onlinejudge')
-    
-    try:
-        s3_client = get_s3_client()
-        s3_client.delete_object(Bucket=bucket_name, Key=object_key)
-        return True, "文件删除成功"
-    except ClientError as e:
-        error_msg = f"删除文件失败: {e.response.get('Error', {}).get('Message', str(e))}"
-        return False, error_msg
-    except Exception as e:
-        return False, f"删除文件失败: {str(e)}"
-
-
 def file_exists_in_bucket(object_key: str, bucket_name: Optional[str] = None) -> bool:
     """
     检查文件是否存在于bucket中
@@ -363,12 +338,12 @@ def get_temp_avatar_path(filename: str) -> str:
         filename: 文件名（建议包含扩展名）
         
     Returns:
-        str: 文件路径，如 "temp/avatars/uuid_filename.jpg"
+        str: 文件路径，如 "avatars/temp/uuid_filename.jpg"
     """
     unique_id = str(uuid.uuid4()).replace('-', '')
     _, ext = os.path.splitext(filename)
     unique_filename = f"{unique_id}{ext}"
-    return f"temp/avatars/{unique_filename}"
+    return f"avatars/temp/{unique_filename}"
 
 
 def get_avatar_path(user_id: int, filename: str) -> str:

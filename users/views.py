@@ -102,8 +102,8 @@ def _serialize_user(user: User) -> Dict[str, Any]:
     # 如果avatar_url是object_key格式（以avatars/开头且不是完整URL），直接生成URL
     # 优化：不在调用get_file_url函数，检查文件是否存在，直接生成URL
     if avatar_url.startswith('avatars/') and not avatar_url.startswith('http'):
-        endpoint = getattr(settings, 'AWS_S3_ENDPOINT_URL', 'http://localhost:9000').rstrip('/')
-        bucket_name = getattr(settings, 'AWS_STORAGE_BUCKET_NAME', 'onlinejudge')
+        endpoint = getattr(settings, 'AWS_S3_ENDPOINT_URL').rstrip('/')
+        bucket_name = getattr(settings, 'AWS_STORAGE_BUCKET_NAME')
         avatar_url = f"{endpoint}/{bucket_name}/{avatar_url}"
     # 如果已经是完整URL，直接使用
     
@@ -122,7 +122,7 @@ def _serialize_user(user: User) -> Dict[str, Any]:
         'total_submissions': user.total_submissions,
         'accepted_submissions': user.accepted_submissions,
         'created_at': user.created_at.isoformat() if user.created_at else None,
-        'permission': str(user.permission) if user.permission else 'user',
+        'permission': str(user.permission) if user.permission else '0',
     }
 
 
@@ -209,7 +209,7 @@ def register(request):
     - email: 邮箱（必需）
     - gender: 性别（可选），可选值: 'M'（男）、'F'（女）
     - motto: 个性签名（可选）
-    - avatar_url: 临时文件的 object_key（可选），格式如 "avatars/temp/{uuid}/avatar.{ext}"
+    - avatar_url: 临时文件的 object_key（可选），格式如 "avatars/temp/{uuid}.{ext}"
     - student_id: 学号（可选）
     - class_name: 班级（可选）
     - real_name: 真实姓名（可选）
@@ -243,10 +243,6 @@ def register(request):
     except ValidationError:
         return _json_error('邮箱格式不正确')
     
-    # 验证性别字段（如果提供了）
-    if gender and gender not in ['M', 'F']:
-        return _json_error('性别参数无效，可选值: M（男）、F（女）', status=400, code='invalid_gender')
-
     # 验证临时头像文件是否存在（如果提供了）
     if temp_avatar_key:
         if not file_exists_in_bucket(object_key=temp_avatar_key):
@@ -300,7 +296,11 @@ def register(request):
                 real_name=real_name,
                 status='normal',  # 新用户默认为正常状态
                 avatar_url='',  # 临时设置为空，后续会更新
+                last_login_time=datetime.now(timezone.utc),
             )
+
+            # user.last_login_time = datetime.now(timezone.utc)
+            # user.save(update_fields=['last_login_time'])
             
             # 步骤3: 如果有临时头像文件，移动到正式目录
             if temp_avatar_key:
@@ -533,7 +533,7 @@ def user_profile(request):
                 gender = str(gender_value).strip()
             
             if gender not in ['M', 'F', '']:
-                errors['gender'] = f'性别值必须是 M（男）、F（女）或空字符串（未设置），收到: {repr(gender)}'
+                errors['gender'] = f'性别值必须是 M（男）、F（女），收到: {repr(gender)}'
             else:
                 user.gender = gender
                 update_fields.append('gender')
@@ -567,8 +567,8 @@ def user_profile(request):
             if user.avatar_url:
                 # 如果当前存储的是完整URL，尝试提取object_key
                 if user.avatar_url.startswith('http://') or user.avatar_url.startswith('https://'):
-                    endpoint = getattr(settings, 'AWS_S3_ENDPOINT_URL', 'http://localhost:9000').rstrip('/')
-                    bucket_name = getattr(settings, 'AWS_STORAGE_BUCKET_NAME', 'onlinejudge')
+                    endpoint = getattr(settings, 'AWS_S3_ENDPOINT_URL').rstrip('/')
+                    bucket_name = getattr(settings, 'AWS_STORAGE_BUCKET_NAME')
                     url_prefix = f"{endpoint}/{bucket_name}/"
                     if user.avatar_url.startswith(url_prefix):
                         old_avatar_key = user.avatar_url[len(url_prefix):]
@@ -584,8 +584,8 @@ def user_profile(request):
                 if avatar_value.startswith('http://') or avatar_value.startswith('https://'):
                     # 是完整URL，尝试从URL中提取object_key
                     # URL格式: http://endpoint/bucket/object_key
-                    endpoint = getattr(settings, 'AWS_S3_ENDPOINT_URL', 'http://localhost:9000').rstrip('/')
-                    bucket_name = getattr(settings, 'AWS_STORAGE_BUCKET_NAME', 'onlinejudge')
+                    endpoint = getattr(settings, 'AWS_S3_ENDPOINT_URL').rstrip('/')
+                    bucket_name = getattr(settings, 'AWS_STORAGE_BUCKET_NAME')
                     url_prefix = f"{endpoint}/{bucket_name}/"
                     
                     print(f"[DEBUG] URL前缀: {url_prefix}")

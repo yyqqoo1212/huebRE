@@ -106,7 +106,7 @@ MYSQL_DATABASE_NAME = os.getenv('MYSQL_DATABASE_NAME', 'onlinejudge')
 MYSQL_CONNECTION = {
     'host': os.getenv('MYSQL_HOST', 'localhost'),
     'user': os.getenv('MYSQL_USER', 'root'),
-    'password': os.getenv('MYSQL_PASSWORD', '123456'),
+    'password': os.getenv('MYSQL_PASSWORD', 'hueboj123'),
     'port': env_int('MYSQL_PORT', 3306),
     'charset': 'utf8mb4',
 }

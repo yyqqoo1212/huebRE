@@ -15,7 +15,7 @@ class User(models.Model):
     username = models.CharField(max_length=50, unique=True, verbose_name='用户名')
     password_hash = models.CharField(max_length=255)
     email = models.EmailField(max_length=100, unique=True, verbose_name='邮箱')
-    gender = models.CharField(max_length=1, choices=GENDER_CHOICES, blank=True, default='', verbose_name='性别')
+    gender = models.CharField(max_length=1, choices=GENDER_CHOICES, blank=True, default='M', verbose_name='性别')
     motto = models.CharField(max_length=80, blank=True, default='', verbose_name='个性签名')
     avatar_url = models.CharField(max_length=500, blank=True, default='', verbose_name='头像URL')
     # 新增字段
@@ -24,7 +24,7 @@ class User(models.Model):
     real_name = models.CharField(max_length=50, blank=True, default='', verbose_name='真实姓名')
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='normal', verbose_name='用户状态')
     last_login_time = models.DateTimeField(null=True, blank=True, verbose_name='最后登录时间')
-    # 原有字段
+    
     total_submissions = models.IntegerField(default=0)
     accepted_submissions = models.IntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
