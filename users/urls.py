@@ -10,4 +10,5 @@ urlpatterns = [
     # 用户设置相关API（需要认证）
     path('me', views.user_profile, name='user-profile'),
     path('change-password', views.change_password, name='user-change-password'),
+    path('delete-account', views.delete_account, name='user-delete-account'),
 ]

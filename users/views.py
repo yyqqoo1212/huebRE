@@ -16,6 +16,7 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
+from .account_deletion import delete_account_by_id
 from .models import User
 from .storage import (
     delete_file_from_bucket,
@@ -790,6 +791,27 @@ def change_password(request):
         traceback.print_exc()
         return _json_error(f'修改密码失败: {str(e)}', status=500, code='db_error')
 
+
+@csrf_exempt
+@jwt_required
+@require_http_methods(['DELETE'])
+def delete_account(request):
+    """
+    注销当前登录用户
+    """
+    user = request.user
+    success, message = delete_account_by_id(user.id)
+
+    if success:
+        return _json_success('账户已注销')
+
+    status_code = 400
+    error_code = 'delete_failed'
+    if '不存在' in message:
+        status_code = 404
+        error_code = 'user_not_found'
+
+    return _json_error(message, status=status_code, code=error_code)
 
 @csrf_exempt
 @require_http_methods(['POST'])
