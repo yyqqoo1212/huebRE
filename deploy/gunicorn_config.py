@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # Gunicorn 配置文件
 # 可以通过命令行参数 --config gunicorn_config.py 使用
 

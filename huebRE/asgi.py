@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+
 """
 ASGI config for huebRE project.
 
