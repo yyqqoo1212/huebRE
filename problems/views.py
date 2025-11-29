@@ -10,13 +10,6 @@ from problems.models import Problem, ProblemData
 from users.views import _json_error, _json_success, _parse_request_body, jwt_required
 
 
-def health(request):
-    """
-    简单的健康检查视图，后续可替换为真实题目接口
-    """
-    return JsonResponse({'code': 'success', 'message': 'problems module ready'})
-
-
 @csrf_exempt
 @require_http_methods(['GET'])
 def list_problems(request):
@@ -169,6 +162,30 @@ def get_problem_detail(request, problem_id):
     if problem_data.tag:
         tags = [tag.strip() for tag in problem_data.tag.split('|') if tag.strip()]
     
+    # 处理样例数据（支持多组，用 | 分隔）
+    samples = []
+    input_demo = problem.input_demo or ''
+    output_demo = problem.output_demo or ''
+    
+    if input_demo or output_demo:
+        # 分割输入样例
+        input_list = input_demo.split('|') if input_demo else []
+        input_list = [item.strip() for item in input_list if item.strip()]
+        
+        # 分割输出样例
+        output_list = output_demo.split('|') if output_demo else []
+        output_list = [item.strip() for item in output_list if item.strip()]
+        
+        # 确定样例组数（取输入和输出的最大长度）
+        max_length = max(len(input_list), len(output_list))
+        
+        # 构建样例列表
+        for i in range(max_length):
+            samples.append({
+                'input': input_list[i] if i < len(input_list) else '',
+                'output': output_list[i] if i < len(output_list) else ''
+            })
+    
     # 难度映射
     level_map = {
         ProblemData.LEVEL_EASY: 1,
@@ -184,8 +201,9 @@ def get_problem_detail(request, problem_id):
             'content': problem.content,
             'input_description': problem.input_description,
             'output_description': problem.output_description,
-            'input_demo': problem.input_demo,
-            'output_demo': problem.output_demo,
+            'input_demo': problem.input_demo,  # 保留原始数据，兼容旧代码
+            'output_demo': problem.output_demo,  # 保留原始数据，兼容旧代码
+            'samples': samples,  # 新增：解析后的样例数组
             'hint': problem.hint,
             'time_limit': problem.time_limit,
             'memory_limit': problem.memory_limit,

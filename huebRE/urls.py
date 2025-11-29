@@ -19,7 +19,6 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import include, path
 
-# 导入文件存储相关的视图（暂时放在users应用中，但URL在主项目中）
 from users import views as storage_views
 
 urlpatterns = [
@@ -31,7 +30,7 @@ urlpatterns = [
     # 题目相关API
     path('api/problems/', include('problems.urls')),
 
-    # 文件存储相关API（全局功能，供所有模块使用）
+    # Minio文件存储相关API
     path('api/files/upload', storage_views.upload_file, name='file-upload'),
     path('api/files/upload-temp', storage_views.upload_temp_file, name='file-upload-temp'),
     path('api/files/get', storage_views.get_file, name='file-get'),
