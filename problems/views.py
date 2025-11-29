@@ -18,6 +18,190 @@ def health(request):
 
 
 @csrf_exempt
+@require_http_methods(['GET'])
+def list_problems(request):
+    """
+    获取题目列表（支持分页、搜索、难度筛选）
+    
+    GET /api/problems/list
+    
+    查询参数：
+    - page: 页码（默认1）
+    - page_size: 每页数量（默认20）
+    - search: 搜索关键词（题号或标题）
+    - level: 难度筛选（1=简单, 2=中等, 3=困难）
+    - auth: 权限筛选（1=公开, 2=私密, 3=比赛）
+    """
+    from django.core.paginator import Paginator
+    
+    try:
+        page = int(request.GET.get('page', 1))
+        page_size = int(request.GET.get('page_size', 20))
+        search = request.GET.get('search', '').strip()
+        level = request.GET.get('level')
+        auth = request.GET.get('auth')
+    except (TypeError, ValueError):
+        return _json_error('参数格式错误', status=400)
+    
+    # 限制每页数量
+    if page_size > 100:
+        page_size = 100
+    if page_size < 1:
+        page_size = 20
+    
+    # 构建查询
+    queryset = ProblemData.objects.select_related('problem').filter(auth=Problem.PUBLIC)
+    
+    # 难度筛选
+    if level:
+        try:
+            level = int(level)
+            if level in (ProblemData.LEVEL_EASY, ProblemData.LEVEL_MEDIUM, ProblemData.LEVEL_HARD):
+                queryset = queryset.filter(level=level)
+        except (TypeError, ValueError):
+            pass
+    
+    # 权限筛选
+    if auth:
+        try:
+            auth = int(auth)
+            if auth in (Problem.PUBLIC, Problem.PRIVATE, Problem.CONTEST):
+                queryset = queryset.filter(auth=auth)
+        except (TypeError, ValueError):
+            pass
+    
+    # 搜索筛选（题号或标题）
+    if search:
+        try:
+            # 尝试将搜索词转换为整数（题号搜索）
+            problem_id = int(search)
+            queryset = queryset.filter(problem__problem_id=problem_id)
+        except (TypeError, ValueError):
+            # 标题搜索
+            queryset = queryset.filter(title__icontains=search)
+    
+    # 按题号排序
+    queryset = queryset.order_by('problem__problem_id')
+    
+    # 分页
+    paginator = Paginator(queryset, page_size)
+    
+    try:
+        page_obj = paginator.page(page)
+    except Exception:
+        return _json_error('页码超出范围', status=400)
+    
+    # 构建返回数据
+    problems = []
+    for problem_data in page_obj.object_list:
+        problem = problem_data.problem
+        # 计算通过率
+        total_submissions = problem_data.submission
+        pass_rate = (problem_data.ac / total_submissions * 100) if total_submissions > 0 else 0
+        
+        # 处理标签
+        tags = []
+        if problem_data.tag:
+            tags = [tag.strip() for tag in problem_data.tag.split('|') if tag.strip()]
+        
+        # 难度映射
+        level_map = {
+            ProblemData.LEVEL_EASY: 'easy',
+            ProblemData.LEVEL_MEDIUM: 'medium',
+            ProblemData.LEVEL_HARD: 'hard'
+        }
+        
+        problems.append({
+            'id': problem.problem_id,
+            'title': problem_data.title,
+            'tags': tags,
+            'difficulty': level_map.get(problem_data.level, 'easy'),
+            'submissions': total_submissions,
+            'passRate': round(pass_rate, 1),
+            'ac': problem_data.ac,
+            'score': problem_data.score,
+        })
+    
+    return _json_success(
+        '获取题目列表成功',
+        data={
+            'problems': problems,
+            'pagination': {
+                'page': page,
+                'page_size': page_size,
+                'total': paginator.count,
+                'total_pages': paginator.num_pages,
+                'has_next': page_obj.has_next(),
+                'has_previous': page_obj.has_previous(),
+            }
+        }
+    )
+
+
+@csrf_exempt
+@require_http_methods(['GET'])
+def get_problem_detail(request, problem_id):
+    """
+    获取题目详情
+    
+    GET /api/problems/{problem_id}
+    """
+    try:
+        problem_id = int(problem_id)
+    except (TypeError, ValueError):
+        return _json_error('题目ID格式错误', status=400)
+    
+    try:
+        # 获取题目详细信息
+        problem = Problem.objects.select_related('stat').get(problem_id=problem_id, auth=Problem.PUBLIC)
+        problem_data = problem.stat
+    except Problem.DoesNotExist:
+        return _json_error('题目不存在或无权限访问', status=404)
+    except Exception as e:
+        return _json_error(f'获取题目详情失败: {str(e)}', status=500)
+    
+    # 计算通过率
+    total_submissions = problem_data.submission
+    pass_rate = (problem_data.ac / total_submissions * 100) if total_submissions > 0 else 0
+    
+    # 处理标签
+    tags = []
+    if problem_data.tag:
+        tags = [tag.strip() for tag in problem_data.tag.split('|') if tag.strip()]
+    
+    # 难度映射
+    level_map = {
+        ProblemData.LEVEL_EASY: 1,
+        ProblemData.LEVEL_MEDIUM: 2,
+        ProblemData.LEVEL_HARD: 3
+    }
+    
+    return _json_success(
+        '获取题目详情成功',
+        data={
+            'id': problem.problem_id,
+            'title': problem.title,
+            'content': problem.content,
+            'input_description': problem.input_description,
+            'output_description': problem.output_description,
+            'input_demo': problem.input_demo,
+            'output_demo': problem.output_demo,
+            'hint': problem.hint,
+            'time_limit': problem.time_limit,
+            'memory_limit': problem.memory_limit,
+            'difficulty': level_map.get(problem_data.level, 1),
+            'submissions': total_submissions,
+            'accepted_count': problem_data.ac,
+            'pass_rate': round(pass_rate, 1),
+            'tags': tags,
+            'score': problem_data.score,
+            'author': problem.author,
+            'create_time': problem.create_time.strftime('%Y-%m-%d %H:%M:%S') if problem.create_time else None,
+        }
+    )
+
+
+@csrf_exempt
 @jwt_required
 @require_http_methods(['POST'])
 def create_problem(request):
