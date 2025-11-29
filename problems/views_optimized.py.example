@@ -1,0 +1,122 @@
+# -*- coding: utf-8 -*-
+# 性能优化示例代码（仅供参考）
+
+"""
+性能优化方案说明：
+
+1. **当前实现分析**：
+   - 已使用 select_related() 避免 N+1 查询 ✅
+   - 已使用分页，只查询当前页数据 ✅
+   - 每次访问都查询数据库 ⚠️
+
+2. **性能评估**：
+   - 小规模（< 1000 题）：压力很小，无需优化
+   - 中规模（1000-10000 题）：压力中等，建议添加缓存
+   - 大规模（> 10000 题）：压力较大，必须优化
+
+3. **优化方案**：
+   a) 数据库索引优化（必须）
+   b) Redis 缓存（推荐）
+   c) 查询优化（已实现）
+"""
+
+from django.core.cache import cache
+from django.db.models import Q, Index
+from django.core.paginator import Paginator
+
+# 方案1：添加 Redis 缓存（推荐）
+def list_problems_with_cache(request):
+    """
+    带缓存的题目列表查询
+    缓存策略：
+    - 无搜索/筛选：缓存 5 分钟
+    - 有搜索/筛选：缓存 1 分钟
+    """
+    from django.core.paginator import Paginator
+    
+    # 获取参数
+    page = int(request.GET.get('page', 1))
+    page_size = int(request.GET.get('page_size', 20))
+    search = request.GET.get('search', '').strip()
+    level = request.GET.get('level')
+    auth = request.GET.get('auth')
+    
+    # 构建缓存键
+    cache_key = f'problem_list:page_{page}:size_{page_size}:search_{search}:level_{level}:auth_{auth}'
+    
+    # 尝试从缓存获取
+    cached_result = cache.get(cache_key)
+    if cached_result:
+        return JsonResponse(cached_result)
+    
+    # 查询数据库（原有逻辑）
+    queryset = ProblemData.objects.select_related('problem').filter(auth=Problem.PUBLIC)
+    # ... 筛选逻辑 ...
+    
+    paginator = Paginator(queryset, page_size)
+    page_obj = paginator.page(page)
+    
+    # 构建返回数据
+    problems = []
+    for problem_data in page_obj.object_list:
+        # ... 数据处理 ...
+        pass
+    
+    result = {
+        'code': 'success',
+        'message': '获取题目列表成功',
+        'data': {
+            'problems': problems,
+            'pagination': {
+                'page': page,
+                'page_size': page_size,
+                'total': paginator.count,
+                'total_pages': paginator.num_pages,
+                'has_next': page_obj.has_next(),
+                'has_previous': page_obj.has_previous(),
+            }
+        }
+    }
+    
+    # 设置缓存（有搜索时缓存时间短，无搜索时缓存时间长）
+    cache_timeout = 60 if (search or level or auth) else 300
+    cache.set(cache_key, result, cache_timeout)
+    
+    return JsonResponse(result)
+
+
+# 方案2：数据库索引优化（在 models.py 中添加）
+"""
+在 ProblemData 模型中添加索引：
+
+class ProblemData(models.Model):
+    # ... 现有字段 ...
+    
+    class Meta:
+        db_table = 'problem_data'
+        indexes = [
+            Index(fields=['auth', 'level']),  # 复合索引，优化筛选查询
+            Index(fields=['title']),  # 优化标题搜索
+            Index(fields=['problem']),  # 优化关联查询
+        ]
+"""
+
+
+# 方案3：使用 only() 只查询需要的字段
+def list_problems_optimized(request):
+    """
+    只查询需要的字段，减少数据传输
+    """
+    queryset = ProblemData.objects.select_related('problem').filter(
+        auth=Problem.PUBLIC
+    ).only(
+        'problem__problem_id',
+        'title',
+        'level',
+        'submission',
+        'ac',
+        'tag',
+        'score'
+    )
+    # ... 其余逻辑相同 ...
+

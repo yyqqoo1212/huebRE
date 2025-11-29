@@ -35,6 +35,10 @@ class Problem(models.Model):
         ordering = ['-create_time']
         verbose_name = '题目'
         verbose_name_plural = '题目'
+        indexes = [
+            models.Index(fields=['auth'], name='problem_auth_idx'),
+            models.Index(fields=['problem_id'], name='problem_id_idx'),
+        ]
 
     def __str__(self) -> str:
         return f'{self.problem_id} - {self.title}'
@@ -78,6 +82,10 @@ class ProblemData(models.Model):
         db_table = 'problem_data'
         verbose_name = '题目统计'
         verbose_name_plural = '题目统计'
+        indexes = [
+            models.Index(fields=['auth', 'level'], name='problem_data_auth_level_idx'),
+            models.Index(fields=['title'], name='problem_data_title_idx'),
+        ]
 
     def __str__(self) -> str:
         return f'{self.problem_id} - {self.title}'
