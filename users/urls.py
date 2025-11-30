@@ -14,4 +14,7 @@ urlpatterns = [
     path('me', views.user_profile, name='user-profile'),
     path('change-password', views.change_password, name='user-change-password'),
     path('delete-account', views.delete_account, name='user-delete-account'),
+    
+    # 管理员API（需要管理员权限）
+    path('list', views.list_users, name='user-list'),
 ]
