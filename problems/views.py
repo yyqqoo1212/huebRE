@@ -27,14 +27,22 @@ def list_problems(request):
     """
     from django.core.paginator import Paginator
     
+    # 解析分页与筛选参数，容错处理，避免因为单个参数错误直接返回 400
+    raw_page = request.GET.get('page', '1')
+    raw_page_size = request.GET.get('page_size', '20')
+    search = (request.GET.get('search', '') or '').strip()
+    level = request.GET.get('level')
+    auth = request.GET.get('auth')
+
     try:
-        page = int(request.GET.get('page', 1))
-        page_size = int(request.GET.get('page_size', 20))
-        search = request.GET.get('search', '').strip()
-        level = request.GET.get('level')
-        auth = request.GET.get('auth')
+        page = int(raw_page)
     except (TypeError, ValueError):
-        return _json_error('参数格式错误', status=400)
+        page = 1
+
+    try:
+        page_size = int(raw_page_size)
+    except (TypeError, ValueError):
+        page_size = 20
     
     # 限制每页数量
     if page_size > 100:
@@ -107,6 +115,9 @@ def list_problems(request):
         problems.append({
             'id': problem.problem_id,
             'title': problem_data.title,
+            'author': problem.author,
+            'create_time': problem.create_time.strftime('%Y-%m-%d %H:%M:%S') if problem.create_time else None,
+            'auth': problem_data.auth,
             'tags': tags,
             'difficulty': level_map.get(problem_data.level, 'easy'),
             'submissions': total_submissions,
