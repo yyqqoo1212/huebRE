@@ -1109,6 +1109,56 @@ def check_file(request):
 
 @csrf_exempt
 @jwt_required
+@require_http_methods(['DELETE'])
+def delete_user(request, user_id):
+    """
+    管理员删除用户（仅管理员）
+    
+    DELETE /api/users/{user_id}/delete - 删除指定用户
+    
+    认证: 需要JWT Token
+    权限: 需要管理员权限（permission >= 1）
+    """
+    admin_user = request.user
+    
+    # 检查管理员权限
+    if not admin_user.permission or admin_user.permission < 1:
+        return _json_error('权限不足，需要管理员权限', status=403, code='permission_denied')
+    
+    try:
+        user_id = int(user_id)
+    except (TypeError, ValueError):
+        return _json_error('无效的用户ID', status=400, code='invalid_user_id')
+    
+    # 不能删除自己
+    if admin_user.id == user_id:
+        return _json_error('不能删除自己的账户', status=400, code='cannot_delete_self')
+    
+    # 检查目标用户是否存在
+    try:
+        from .models import User
+        target_user = User.objects.get(id=user_id)
+    except User.DoesNotExist:
+        return _json_error('用户不存在', status=404, code='user_not_found')
+    
+    # 执行删除
+    from .account_deletion import delete_account_by_id
+    success, message = delete_account_by_id(user_id)
+    
+    if success:
+        return _json_success('用户已删除')
+    
+    status_code = 400
+    error_code = 'delete_failed'
+    if '不存在' in message:
+        status_code = 404
+        error_code = 'user_not_found'
+    
+    return _json_error(message, status=status_code, code=error_code)
+
+
+@csrf_exempt
+@jwt_required
 @require_http_methods(['GET'])
 def list_users(request):
     """
