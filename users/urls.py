@@ -18,4 +18,6 @@ urlpatterns = [
     # 管理员API（需要管理员权限）
     path('list', views.list_users, name='user-list'),
     path('<int:user_id>/delete', views.delete_user, name='user-delete'),
+    path('<int:user_id>/update', views.update_user, name='user-update'),
+    path('<int:user_id>/reset-password', views.reset_user_password, name='user-reset-password'),
 ]

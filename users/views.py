@@ -1159,6 +1159,234 @@ def delete_user(request, user_id):
 
 @csrf_exempt
 @jwt_required
+@require_http_methods(['PATCH'])
+def update_user(request, user_id):
+    """
+    管理员更新用户信息（仅管理员）
+    
+    PATCH /api/users/{user_id}/update - 更新指定用户信息
+    
+    认证: 需要JWT Token
+    权限: 需要管理员权限（permission >= 1）
+    
+    请求参数（JSON格式）:
+    - username: 新用户名（可选），3-50个字符
+    - email: 新邮箱（可选），必须是有效的邮箱格式
+    - gender: 性别（可选），可选值: 'M'（男）、'F'（女）、''（未设置）
+    - student_id: 学号（可选）
+    - class_name: 班级（可选）
+    - real_name: 真实姓名（可选）
+    - status: 用户状态（可选），可选值: 'normal'（正常）、'banned'（封禁）
+    - permission: 权限（可选），0: 普通用户，1: 管理员，2: 超级管理员
+    """
+    admin_user = request.user
+    
+    # 检查管理员权限
+    if not admin_user.permission or admin_user.permission < 1:
+        return _json_error('权限不足，需要管理员权限', status=403, code='permission_denied')
+    
+    try:
+        user_id = int(user_id)
+    except (TypeError, ValueError):
+        return _json_error('无效的用户ID', status=400, code='invalid_user_id')
+    
+    # 检查目标用户是否存在
+    try:
+        target_user = User.objects.get(id=user_id)
+    except User.DoesNotExist:
+        return _json_error('用户不存在', status=404, code='user_not_found')
+    
+    try:
+        data = _parse_request_body(request)
+    except ValueError as exc:
+        return _json_error(str(exc), status=400, code='invalid_request')
+    
+    update_fields = []
+    errors = {}
+    
+    # 验证并更新用户名
+    if 'username' in data:
+        username = (data.get('username') or '').strip()
+        if not username:
+            errors['username'] = '用户名不能为空'
+        elif len(username) < 3 or len(username) > 50:
+            errors['username'] = '用户名长度需在3-50字符之间'
+        else:
+            # 检查用户名是否已被使用（排除当前用户）
+            if User.objects.filter(username=username).exclude(id=user_id).exists():
+                return _json_error('用户名已被使用，请尝试其他名称', status=400, code='username_taken')
+            target_user.username = username
+            update_fields.append('username')
+    
+    # 验证并更新邮箱
+    if 'email' in data:
+        email = (data.get('email') or '').strip()
+        if not email:
+            errors['email'] = '邮箱不能为空'
+        else:
+            try:
+                validate_email(email)
+            except ValidationError:
+                errors['email'] = '邮箱格式不正确'
+            else:
+                # 检查邮箱是否已被使用（排除当前用户）
+                if User.objects.filter(email=email).exclude(id=user_id).exists():
+                    return _json_error('邮箱已被注册，请尝试其他邮箱', status=400, code='email_taken')
+                target_user.email = email
+                update_fields.append('email')
+    
+    # 验证并更新性别
+    if 'gender' in data:
+        gender_value = data.get('gender')
+        if gender_value is None:
+            gender = ''
+        else:
+            gender = str(gender_value).strip()
+        
+        if gender not in ['M', 'F', '']:
+            errors['gender'] = f'性别值必须是 M（男）、F（女）或空字符串，收到: {repr(gender)}'
+        else:
+            target_user.gender = gender
+            update_fields.append('gender')
+    
+    # 验证并更新学号
+    if 'student_id' in data:
+        student_id = (data.get('student_id') or '').strip()
+        if len(student_id) > 50:
+            errors['student_id'] = '学号最多50个字符'
+        else:
+            target_user.student_id = student_id
+            update_fields.append('student_id')
+    
+    # 验证并更新班级
+    if 'class_name' in data:
+        class_name = (data.get('class_name') or '').strip()
+        if len(class_name) > 100:
+            errors['class_name'] = '班级最多100个字符'
+        else:
+            target_user.class_name = class_name
+            update_fields.append('class_name')
+    
+    # 验证并更新真实姓名
+    if 'real_name' in data:
+        real_name = (data.get('real_name') or '').strip()
+        if len(real_name) > 50:
+            errors['real_name'] = '真实姓名最多50个字符'
+        else:
+            target_user.real_name = real_name
+            update_fields.append('real_name')
+    
+    # 验证并更新状态
+    if 'status' in data:
+        status = (data.get('status') or '').strip()
+        if status not in ['normal', 'banned']:
+            errors['status'] = f'状态值必须是 normal（正常）或 banned（封禁），收到: {repr(status)}'
+        else:
+            target_user.status = status
+            update_fields.append('status')
+    
+    # 验证并更新权限
+    if 'permission' in data:
+        permission_value = data.get('permission')
+        try:
+            permission = int(permission_value) if permission_value is not None else 0
+            if permission not in [0, 1, 2]:
+                errors['permission'] = f'权限值必须是 0（普通用户）、1（管理员）或 2（超级管理员），收到: {repr(permission)}'
+            else:
+                # 不能将自己的权限降低到低于当前权限
+                if admin_user.id == user_id and permission < admin_user.permission:
+                    return _json_error('不能降低自己的权限', status=400, code='cannot_lower_own_permission')
+                target_user.permission = permission
+                update_fields.append('permission')
+        except (TypeError, ValueError):
+            errors['permission'] = f'权限值必须是整数，收到: {repr(permission_value)}'
+    
+    if errors:
+        return _json_error('请求参数不合法', status=400, code='invalid_request', details=errors)
+    
+    # 如果没有要更新的字段
+    if not update_fields:
+        return _json_success('没有需要更新的字段', data=_serialize_user(target_user))
+    
+    # 保存用户信息
+    try:
+        with transaction.atomic():
+            target_user.save(update_fields=update_fields)
+        return _json_success('更新成功', data=_serialize_user(target_user))
+    except IntegrityError as exc:
+        # 检查是否是唯一性约束冲突
+        if User.objects.filter(username=target_user.username).exclude(id=user_id).exists():
+            return _json_error('用户名已被使用，请尝试其他名称', status=400, code='username_taken')
+        if User.objects.filter(email=target_user.email).exclude(id=user_id).exists():
+            return _json_error('邮箱已被注册，请尝试其他邮箱', status=400, code='email_taken')
+        return _json_error('更新失败，请重试', status=500, code='db_error')
+    except Exception as e:
+        print(f"[DEBUG] 更新用户信息异常: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return _json_error(f'更新失败: {str(e)}', status=500, code='db_error')
+
+
+@csrf_exempt
+@jwt_required
+@require_http_methods(['POST'])
+def reset_user_password(request, user_id):
+    """
+    管理员重置用户密码（仅管理员）
+    
+    POST /api/users/{user_id}/reset-password - 重置指定用户密码
+    
+    认证: 需要JWT Token
+    权限: 需要管理员权限（permission >= 1）
+    
+    请求参数（JSON格式）:
+    - new_password: 新密码（必需），至少6位
+    """
+    admin_user = request.user
+    
+    # 检查管理员权限
+    if not admin_user.permission or admin_user.permission < 1:
+        return _json_error('权限不足，需要管理员权限', status=403, code='permission_denied')
+    
+    try:
+        user_id = int(user_id)
+    except (TypeError, ValueError):
+        return _json_error('无效的用户ID', status=400, code='invalid_user_id')
+    
+    # 检查目标用户是否存在
+    try:
+        target_user = User.objects.get(id=user_id)
+    except User.DoesNotExist:
+        return _json_error('用户不存在', status=404, code='user_not_found')
+    
+    try:
+        data = _parse_request_body(request)
+    except ValueError as exc:
+        return _json_error(str(exc), status=400, code='invalid_request')
+    
+    new_password = data.get('new_password', '').strip()
+    
+    # 验证参数
+    if not new_password:
+        return _json_error('请输入新密码', status=400, code='invalid_request')
+    
+    if len(new_password) < 6:
+        return _json_error('新密码长度至少6位', status=400, code='invalid_request')
+    
+    # 更新密码
+    try:
+        target_user.password_hash = make_password(new_password)
+        target_user.save(update_fields=['password_hash'])
+        return _json_success('密码重置成功')
+    except Exception as e:
+        print(f"[DEBUG] 重置密码异常: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return _json_error(f'重置密码失败: {str(e)}', status=500, code='db_error')
+
+
+@csrf_exempt
+@jwt_required
 @require_http_methods(['GET'])
 def list_users(request):
     """
