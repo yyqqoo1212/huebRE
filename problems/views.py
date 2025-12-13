@@ -8,9 +8,10 @@ from django.http import HttpResponse, JsonResponse
 from django.core.files.uploadedfile import UploadedFile
 from django.core.cache import cache
 
-from problems.models import Problem, ProblemData
+from problems.models import Problem, ProblemData, Submission
 from users.views import _json_error, _json_success, _parse_request_body, jwt_required
 from users.storage import get_s3_client, get_problem_testcase_path, upload_file_to_bucket
+from botocore.exceptions import ClientError
 from django.conf import settings
 import threading
 import os
@@ -19,6 +20,9 @@ import tempfile
 import shutil
 from io import BytesIO
 from uuid import uuid4
+import hashlib
+import requests
+import json
 
 
 @csrf_exempt
@@ -925,3 +929,1087 @@ def clear_problem_testcases(request, problem_id):
         print(f"清空题目 {problem_id} 的测评数据失败: {exc}")
 
     return _json_success('清空测评数据完成', data={'problem_id': problem_id})
+
+
+def _get_language_config(language: str) -> dict:
+    """
+    根据语言类型获取判题机语言配置
+    
+    Args:
+        language: 语言类型 ('cpp', 'java', 'python', 'javascript')
+        
+    Returns:
+        dict: 语言配置字典
+    """
+    language_configs = {
+        'cpp': {
+            'compile': {
+                'src_name': 'main.cpp',
+                'exe_name': 'main',
+                'max_cpu_time': 3000,
+                'max_real_time': 5000,
+                'max_memory': 134217728,
+                'compile_command': '/usr/bin/g++ -DONLINE_JUDGE -O2 -w -fmax-errors=3 -std=c++11 {src_path} -lm -o {exe_path}'
+            },
+            'run': {
+                'command': '{exe_path}',
+                'seccomp_rule': 'c_cpp',
+                'env': ['LANG=en_US.UTF-8', 'LANGUAGE=en_US:en', 'LC_ALL=en_US.UTF-8']
+            }
+        },
+        'java': {
+            'compile': {
+                'src_name': 'Main.java',
+                'exe_name': 'Main',
+                'max_cpu_time': 3000,
+                'max_real_time': 5000,
+                'max_memory': 134217728,
+                'compile_command': '/usr/bin/javac -encoding UTF-8 {src_path}'
+            },
+            'run': {
+                'command': '/usr/bin/java -cp {exe_dir} -Xmx{max_memory} Main',
+                'seccomp_rule': 'general',
+                'env': ['LANG=en_US.UTF-8', 'LANGUAGE=en_US:en', 'LC_ALL=en_US.UTF-8']
+            }
+        },
+        'python': {
+            'compile': {
+                'src_name': 'solution.py',
+                'exe_name': '__pycache__/solution.cpython-36.pyc',
+                'max_cpu_time': 3000,
+                'max_real_time': 5000,
+                'max_memory': 134217728,
+                'compile_command': '/usr/bin/python3 -m py_compile {src_path}'
+            },
+            'run': {
+                'command': '/usr/bin/python3 {exe_path}',
+                'seccomp_rule': 'general',
+                'env': ['PYTHONIOENCODING=UTF-8', 'LANG=en_US.UTF-8', 'LANGUAGE=en_US:en', 'LC_ALL=en_US.UTF-8']
+            }
+        },
+        'javascript': {
+            'run': {
+                'exe_name': 'solution.js',
+                'command': '/usr/bin/node {exe_path}',
+                'seccomp_rule': '',
+                'env': ['LANG=en_US.UTF-8', 'LANGUAGE=en_US:en', 'LC_ALL=en_US.UTF-8'],
+                'memory_limit_check_only': 1
+            }
+        }
+    }
+    
+    return language_configs.get(language, language_configs['cpp'])
+
+
+def judge_code(
+    src: str,
+    language: str,
+    test_case: list,
+    max_cpu_time: int,
+    max_memory: int,
+    output: bool = True,
+    test_case_id: str = None,
+    spj_version: str = None,
+    spj_config: dict = None,
+    spj_compile_config: dict = None,
+    spj_src: str = None,
+    io_mode: dict = None
+) -> dict:
+    """
+    通用判题函数：调用判题机服务器运行代码
+    
+    Args:
+        src: 源代码（必需）
+        language: 语言类型（必需），可选值: 'cpp', 'java', 'python', 'javascript'
+        test_case: 测试用例数组（可选），格式: [{"input": "...", "output": "..."}]
+        max_cpu_time: 最大CPU时间（毫秒）（必需）
+        max_memory: 最大内存（字节）（必需）
+        output: 是否返回程序输出内容（默认True）
+        test_case_id: 测试用例ID（可选，使用预定义的测试用例，与test_case二选一）
+        spj_version: 特殊判题程序版本号（可选）
+        spj_config: 特殊判题程序运行配置（可选）
+        spj_compile_config: 特殊判题程序编译配置（可选）
+        spj_src: 特殊判题程序源代码（可选）
+        io_mode: 输入输出模式（可选）
+        
+    Returns:
+        dict: 判题结果，格式:
+        {
+            'success': bool,  # 是否成功
+            'error': str,     # 错误类型（如果失败）
+            'message': str,   # 错误消息（如果失败）
+            'data': list,     # 判题结果数组（如果成功），每个元素包含:
+            #   {
+            #       'cpu_time': int,      # CPU时间（毫秒）
+            #       'real_time': int,     # 实际时间（毫秒）
+            #       'memory': int,        # 内存使用（字节）
+            #       'signal': int,        # 信号编号
+            #       'exit_code': int,     # 程序退出码
+            #       'error': int,          # 错误类型
+            #       'result': int,         # 判题结果（0=成功, -1=答案错误, >0=各种错误）
+            #       'test_case': str,      # 测试用例编号
+            #       'output_md5': str,     # 输出MD5（如果设置了output）
+            #       'output': str          # 程序输出（如果设置了output=True）
+            #   }
+        }
+    """
+    judge_server_url = getattr(settings, 'JUDGE_SERVER_URL', 'http://101.42.172.229:12358')
+    judge_server_token = getattr(settings, 'JUDGE_SERVER_TOKEN', 'OYg4fMThGAjH80rojURhEz5GOBgSlMVm')
+    
+    # 计算Token的SHA256哈希值
+    token_hash = hashlib.sha256(judge_server_token.encode('utf-8')).hexdigest()
+    
+    # 获取语言配置
+    language_config = _get_language_config(language)
+    
+    # 构建请求体
+    request_data = {
+        'src': src,
+        'language_config': language_config,
+        'max_cpu_time': max_cpu_time,
+        'max_memory': max_memory,
+        'output': output
+    }
+    
+    # 添加测试用例（test_case_id 和 test_case 二选一）
+    if test_case_id:
+        request_data['test_case_id'] = test_case_id
+    elif test_case:
+        request_data['test_case'] = test_case
+    else:
+        return {
+            'success': False,
+            'error': 'InvalidRequest',
+            'message': '必须提供 test_case_id 或 test_case 之一'
+        }
+    
+    # 添加特殊判题程序相关参数（如果提供）
+    if spj_version:
+        request_data['spj_version'] = spj_version
+    if spj_config:
+        request_data['spj_config'] = spj_config
+    if spj_compile_config:
+        request_data['spj_compile_config'] = spj_compile_config
+    if spj_src:
+        request_data['spj_src'] = spj_src
+    if io_mode:
+        request_data['io_mode'] = io_mode
+    
+    # 发送请求到判题机
+    try:
+        response = requests.post(
+            f'{judge_server_url}/judge',
+            headers={
+                'X-Judge-Server-Token': token_hash,
+                'Content-Type': 'application/json'
+            },
+            json=request_data,
+            timeout=60  # 60秒超时（判题可能需要较长时间）
+        )
+        
+        response.raise_for_status()
+        result = response.json()
+        
+        # 检查是否有错误
+        if result.get('err'):
+            error_type = result.get('err')
+            error_message = f"判题机错误: {error_type}"
+            
+            # 如果是编译错误，尝试从data中获取错误信息
+            if error_type == 'CompileError' and result.get('data'):
+                compile_error = result.get('data')
+                if isinstance(compile_error, str):
+                    error_message = f"编译错误:\n{compile_error}"
+                elif isinstance(compile_error, dict) and compile_error.get('message'):
+                    error_message = f"编译错误:\n{compile_error.get('message')}"
+            
+            return {
+                'success': False,
+                'error': error_type,
+                'message': error_message,
+                'data': result.get('data')  # 可能包含编译错误信息
+            }
+        
+        # 返回完整的判题结果JSON
+        return {
+            'success': True,
+            'data': result.get('data', [])
+        }
+    except requests.exceptions.Timeout:
+        return {
+            'success': False,
+            'error': 'Timeout',
+            'message': '判题机请求超时，请稍后重试'
+        }
+    except requests.exceptions.RequestException as e:
+        return {
+            'success': False,
+            'error': 'RequestError',
+            'message': f'判题机请求失败: {str(e)}'
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'error': 'UnknownError',
+            'message': f'判题机调用异常: {str(e)}'
+        }
+
+
+@csrf_exempt
+@jwt_required
+@require_http_methods(['POST'])
+def run_test(request, problem_id):
+    """
+    运行自测（调用判题机运行代码）
+    
+    POST /api/problems/{problem_id}/run-test
+    
+    请求参数（JSON格式）:
+    - code: 源代码（必需）
+    - language: 语言类型（必需），可选值: 'cpp', 'java', 'python', 'javascript'
+    - test_input: 测试用例输入（必需）
+    
+    认证: 需要JWT Token
+    """
+    try:
+        problem_id = int(problem_id)
+    except (TypeError, ValueError):
+        return _json_error('题目ID格式错误', status=400)
+    
+    # 检查题目是否存在
+    try:
+        problem = Problem.objects.get(problem_id=problem_id)
+    except Problem.DoesNotExist:
+        return _json_error('题目不存在', status=404)
+    
+    # 解析请求数据
+    try:
+        data = _parse_request_body(request)
+    except ValueError as exc:
+        return _json_error(str(exc), status=400, code='bad_json')
+    
+    code = data.get('code', '').strip()
+    language = data.get('language', '').strip()
+    test_input = data.get('test_input', '').strip()
+    
+    # 验证参数
+    if not code:
+        return _json_error('代码不能为空', status=400)
+    
+    if not language:
+        return _json_error('语言类型不能为空', status=400)
+    
+    if language not in ['cpp', 'java', 'python', 'javascript']:
+        return _json_error('不支持的语言类型', status=400)
+    
+    if not test_input:
+        return _json_error('测试用例输入不能为空', status=400)
+    
+    # 获取题目的时间和内存限制（从Problem模型获取）
+    max_cpu_time = problem.time_limit if problem else 1000  # 默认1000ms
+    max_memory = (problem.memory_limit * 1024 * 1024) if problem else 134217728  # 转换为字节，默认128MB
+    
+    # 检查用户输入的测试用例是否匹配题目的测试样例
+    # 如果匹配，则进行答案对比；如果不匹配，则不进行答案对比
+    expected_output = ''
+    is_matched_sample = False  # 标记是否匹配了测试样例
+    input_demo = problem.input_demo or ''
+    output_demo = problem.output_demo or ''
+    
+    if input_demo and output_demo:
+        # 解析样例（用 | 分隔）
+        input_list = [s.strip() for s in input_demo.split('|') if s.strip()]
+        output_list = [s.strip() for s in output_demo.split('|') if s.strip()]
+        
+        # 检查用户输入是否匹配某个样例的输入
+        # 去除首尾空白字符后进行比较
+        test_input_normalized = test_input.strip()
+        for i, sample_input in enumerate(input_list):
+            if sample_input == test_input_normalized:
+                # 找到匹配的样例，使用对应的输出作为期望输出
+                # 去除末尾的空白字符（空格、制表符、换行符等），避免格式问题导致答案错误
+                if i < len(output_list):
+                    expected_output = output_list[i].rstrip()  # 只去除末尾空白，保留开头的空白（如果有）
+                    is_matched_sample = True  # 标记已匹配测试样例
+                break
+    
+    # 构建测试用例数组
+    # 如果匹配了样例，则进行答案对比；否则不进行答案对比
+    test_case = [{
+        'input': test_input,
+        'output': expected_output  # 如果匹配样例，则进行答案对比；否则为空字符串，不进行答案对比
+    }]
+    
+    # 调用通用判题函数
+    judge_result = judge_code(
+        src=code,
+        language=language,
+        test_case=test_case,
+        max_cpu_time=max_cpu_time,
+        max_memory=max_memory,
+        output=True
+    )
+    
+    # 如果判题失败（如编译错误），直接返回错误信息
+    if not judge_result['success']:
+        error_data = judge_result.get('data')
+        if error_data:
+            # 如果有详细的错误信息，使用它
+            if isinstance(error_data, str):
+                output_text = error_data
+            elif isinstance(error_data, dict):
+                output_text = error_data.get('message', judge_result['message'])
+            else:
+                output_text = judge_result['message']
+        else:
+            output_text = judge_result['message']
+        
+        return _json_success('运行完成', data={
+            'output': output_text,
+            'result': -2,  # 编译错误或系统错误
+            'error': judge_result.get('error'),
+            'raw_result': judge_result  # 返回完整的JSON结果
+        })
+    
+    results = judge_result.get('data', [])
+    if not results or len(results) == 0:
+        return _json_error('判题机返回结果为空', status=500)
+    
+    result = results[0]  # 只有一个测试用例
+    
+    # 构建返回结果
+    output_text = ''
+    result_code = result.get('result', 5)
+    
+    # 检查是否有编译错误（通过err字段判断）
+    if result_code == 5:  # SYSTEM_ERROR，可能是编译错误
+        output_text = '系统错误'
+        # 如果有输出信息，也显示出来
+        if result.get('output'):
+            output_text = result.get('output')
+    elif result_code == 1:  # CPU_TIME_LIMIT_EXCEEDED
+        output_text = f"CPU时间超限（限制: {max_cpu_time}ms，实际: {result.get('cpu_time', 0)}ms）"
+        if result.get('output'):
+            output_text = result.get('output') + '\n\n' + output_text
+    elif result_code == 2:  # REAL_TIME_LIMIT_EXCEEDED
+        output_text = f"实际时间超限（限制: {max_cpu_time * 2}ms，实际: {result.get('real_time', 0)}ms）"
+        if result.get('output'):
+            output_text = result.get('output') + '\n\n' + output_text
+    elif result_code == 3:  # MEMORY_LIMIT_EXCEEDED
+        memory_mb = result.get('memory', 0) / (1024 * 1024)
+        max_memory_mb = max_memory / (1024 * 1024)
+        output_text = f"内存超限（限制: {max_memory_mb:.2f}MB，实际: {memory_mb:.2f}MB）"
+        if result.get('output'):
+            output_text = result.get('output') + '\n\n' + output_text
+    elif result_code == 4:  # RUNTIME_ERROR
+        exit_code = result.get('exit_code', 0)
+        signal = result.get('signal', 0)
+        if signal:
+            output_text = f"运行时错误（信号: {signal}，退出码: {exit_code}）"
+        else:
+            output_text = f"运行时错误（退出码: {exit_code}）"
+        if result.get('output'):
+            output_text = result.get('output') + '\n\n' + output_text
+    elif result_code == 0:  # SUCCESS
+        # 程序运行成功，显示输出
+        output_text = result.get('output', '')
+        if not output_text:
+            output_text = '(程序运行成功，但无输出)'
+    elif result_code == -1:  # WRONG_ANSWER
+        # 如果输入不是测试样例，且程序正常运行完成，则视为 Accepted
+        # 如果输入是测试样例，则使用判题机返回的结果（Wrong Answer）
+        exit_code = result.get('exit_code', 0)
+        error = result.get('error', 0)
+        
+        # 如果程序正常运行完成（没有运行时错误），且输入不匹配测试样例，则视为 Accepted
+        if not is_matched_sample and exit_code == 0 and error == 0:
+            # 程序正常运行完成，但不是测试样例，视为 Accepted
+            result_code = 0  # 改为 Accepted
+            output_text = result.get('output', '')
+            if not output_text:
+                output_text = '(程序运行成功，但无输出)'
+        else:
+            # 匹配了测试样例，使用判题机返回的结果（Wrong Answer）
+            output_text = result.get('output', '')
+            if not output_text:
+                output_text = '(程序运行成功，但无输出)'
+    else:
+        output_text = f"未知错误（结果代码: {result_code}）"
+        if result.get('output'):
+            output_text = result.get('output') + '\n\n' + output_text
+    
+    # 如果输入不是测试样例，且程序正常运行完成，将 result 设置为 0（Accepted）
+    if not is_matched_sample:
+        exit_code = result.get('exit_code', 0)
+        error = result.get('error', 0)
+        # 如果程序正常运行完成（没有运行时错误、超时、内存超限等），则视为 Accepted
+        if exit_code == 0 and error == 0 and result_code not in [1, 2, 3, 4, 5]:
+            result_code = 0  # 改为 Accepted
+    
+    # 更新 result 对象中的 result 字段
+    result['result'] = result_code
+    
+    # 返回结果：只返回必要的字段，避免冗余
+    # 自测模式下，直接返回判题机的原始结果即可
+    return _json_success('运行完成', data=result)
+
+
+@csrf_exempt
+@jwt_required
+@require_http_methods(['POST'])
+def judge(request):
+    """
+    通用判题接口：调用判题机运行代码并返回完整的JSON结果
+    
+    POST /api/problems/judge
+    
+    请求参数（JSON格式）:
+    - src: 源代码（必需）
+    - language: 语言类型（必需），可选值: 'cpp', 'java', 'python', 'javascript'
+    - test_case: 测试用例数组（可选），格式: [{"input": "...", "output": "..."}]
+    - test_case_id: 测试用例ID（可选，使用预定义的测试用例，与test_case二选一）
+    - max_cpu_time: 最大CPU时间（毫秒）（必需）
+    - max_memory: 最大内存（字节）（必需）
+    - output: 是否返回程序输出内容（可选，默认True）
+    - spj_version: 特殊判题程序版本号（可选）
+    - spj_config: 特殊判题程序运行配置（可选）
+    - spj_compile_config: 特殊判题程序编译配置（可选）
+    - spj_src: 特殊判题程序源代码（可选）
+    - io_mode: 输入输出模式（可选）
+    
+    认证: 需要JWT Token
+    
+    返回: 完整的判题结果JSON
+    {
+        "success": true,
+        "message": "判题完成",
+        "data": {
+            "success": bool,  # 是否成功
+            "error": str,     # 错误类型（如果失败）
+            "message": str,   # 错误消息（如果失败）
+            "data": list      # 判题结果数组（如果成功）
+        }
+    }
+    """
+    # 解析请求数据
+    try:
+        data = _parse_request_body(request)
+    except ValueError as exc:
+        return _json_error(str(exc), status=400, code='bad_json')
+    
+    # 获取必需参数
+    src = data.get('src', '').strip()
+    language = data.get('language', '').strip()
+    max_cpu_time = data.get('max_cpu_time')
+    max_memory = data.get('max_memory')
+    
+    # 验证必需参数
+    if not src:
+        return _json_error('源代码不能为空', status=400)
+    
+    if not language:
+        return _json_error('语言类型不能为空', status=400)
+    
+    if language not in ['cpp', 'java', 'python', 'javascript']:
+        return _json_error('不支持的语言类型，支持: cpp, java, python, javascript', status=400)
+    
+    if max_cpu_time is None:
+        return _json_error('最大CPU时间不能为空', status=400)
+    
+    try:
+        max_cpu_time = int(max_cpu_time)
+        if max_cpu_time <= 0:
+            raise ValueError('max_cpu_time must be positive')
+    except (ValueError, TypeError):
+        return _json_error('最大CPU时间必须是正整数', status=400)
+    
+    if max_memory is None:
+        return _json_error('最大内存不能为空', status=400)
+    
+    try:
+        max_memory = int(max_memory)
+        if max_memory <= 0:
+            raise ValueError('max_memory must be positive')
+    except (ValueError, TypeError):
+        return _json_error('最大内存必须是正整数', status=400)
+    
+    # 获取可选参数
+    test_case = data.get('test_case')
+    test_case_id = data.get('test_case_id')
+    output = data.get('output', True)
+    spj_version = data.get('spj_version')
+    spj_config = data.get('spj_config')
+    spj_compile_config = data.get('spj_compile_config')
+    spj_src = data.get('spj_src')
+    io_mode = data.get('io_mode')
+    
+    # 验证test_case格式（如果提供）
+    if test_case is not None:
+        if not isinstance(test_case, list):
+            return _json_error('test_case必须是数组', status=400)
+        for i, case in enumerate(test_case):
+            if not isinstance(case, dict):
+                return _json_error(f'test_case[{i}]必须是对象', status=400)
+            if 'input' not in case:
+                return _json_error(f'test_case[{i}]必须包含input字段', status=400)
+    
+    # 调用通用判题函数
+    judge_result = judge_code(
+        src=src,
+        language=language,
+        test_case=test_case,
+        max_cpu_time=max_cpu_time,
+        max_memory=max_memory,
+        output=output,
+        test_case_id=test_case_id,
+        spj_version=spj_version,
+        spj_config=spj_config,
+        spj_compile_config=spj_compile_config,
+        spj_src=spj_src,
+        io_mode=io_mode
+    )
+    
+    # 直接返回完整的JSON结果
+    return _json_success('判题完成', data=judge_result)
+
+
+def _load_testcases_from_minio(problem_id: int) -> list:
+    """
+    从MinIO加载题目的所有测试用例
+    
+    Args:
+        problem_id: 题目ID
+        
+    Returns:
+        list: 测试用例数组，格式: [{"input": "...", "output": "..."}]
+    """
+    bucket_name = getattr(settings, 'AWS_STORAGE_BUCKET_NAME', 'onlinejudge')
+    s3_client = get_s3_client()
+    testcase_prefix = f"problems/{problem_id}/testcases/"
+    
+    testcases = []
+    
+    try:
+        # 列出所有测试用例文件
+        response = s3_client.list_objects_v2(
+            Bucket=bucket_name,
+            Prefix=testcase_prefix
+        )
+        
+        if 'Contents' not in response:
+            return testcases
+        
+        # 收集所有.in和.out文件
+        in_files = {}
+        out_files = {}
+        
+        for obj in response['Contents']:
+            key = obj['Key']
+            filename = os.path.basename(key)
+            
+            if filename.endswith('.in'):
+                # 提取测试用例编号（例如：1.in -> 1）
+                testcase_num = filename[:-3]
+                in_files[testcase_num] = key
+            elif filename.endswith('.out'):
+                testcase_num = filename[:-4]
+                out_files[testcase_num] = key
+        
+        # 按测试用例编号排序
+        testcase_nums = sorted(set(list(in_files.keys()) + list(out_files.keys())))
+        
+        # 读取每个测试用例的输入和输出
+        for num in testcase_nums:
+            input_content = ''
+            output_content = ''
+            
+            # 读取输入文件
+            if num in in_files:
+                try:
+                    response = s3_client.get_object(Bucket=bucket_name, Key=in_files[num])
+                    input_content = response['Body'].read().decode('utf-8')
+                except Exception as e:
+                    print(f"读取测试用例 {num}.in 失败: {e}")
+                    continue
+            
+            # 读取输出文件（可选）
+            if num in out_files:
+                try:
+                    response = s3_client.get_object(Bucket=bucket_name, Key=out_files[num])
+                    output_content = response['Body'].read().decode('utf-8')
+                except Exception as e:
+                    print(f"读取测试用例 {num}.out 失败: {e}")
+                    # 输出文件不存在也可以继续
+            
+            if input_content:  # 至少要有输入文件
+                testcases.append({
+                    'input': input_content,
+                    'output': output_content
+                })
+        
+        return testcases
+        
+    except ClientError as e:
+        print(f"从MinIO加载测试用例失败: {e}")
+        return []
+    except Exception as e:
+        print(f"加载测试用例时出错: {e}")
+        return []
+
+
+@csrf_exempt
+@jwt_required
+@require_http_methods(['POST'])
+def submit_code(request, problem_id):
+    """
+    提交代码进行判题（使用题目的时间限制和内存限制）
+    
+    POST /api/problems/{problem_id}/submit
+    
+    请求参数（JSON格式）:
+    - code: 源代码（必需）
+    - language: 语言类型（必需），可选值: 'cpp', 'java', 'python', 'javascript'
+    
+    认证: 需要JWT Token
+    
+    返回: 判题结果
+    {
+        "success": true,
+        "message": "判题完成",
+        "data": {
+            "success": bool,
+            "error": str,
+            "message": str,
+            "data": list  # 判题结果数组
+        }
+    }
+    """
+    try:
+        problem_id = int(problem_id)
+    except (TypeError, ValueError):
+        return _json_error('题目ID格式错误', status=400)
+    
+    # 检查题目是否存在
+    try:
+        problem = Problem.objects.get(problem_id=problem_id)
+    except Problem.DoesNotExist:
+        return _json_error('题目不存在', status=404)
+    
+    # 解析请求数据
+    try:
+        data = _parse_request_body(request)
+    except ValueError as exc:
+        return _json_error(str(exc), status=400, code='bad_json')
+    
+    code = data.get('code', '').strip()
+    language = data.get('language', '').strip()
+    
+    # 验证参数
+    if not code:
+        return _json_error('代码不能为空', status=400)
+    
+    if not language:
+        return _json_error('语言类型不能为空', status=400)
+    
+    if language not in ['cpp', 'java', 'python', 'javascript']:
+        return _json_error('不支持的语言类型，支持: cpp, java, python, javascript', status=400)
+    
+    # 获取题目的时间和内存限制（从Problem模型获取）
+    # time_limit 单位是毫秒，memory_limit 单位是MB
+    max_cpu_time = problem.time_limit  # 题目设置的时间限制（毫秒）
+    max_memory = problem.memory_limit * 1024 * 1024  # 转换为字节
+    
+    # 从MinIO加载测试用例
+    test_cases = _load_testcases_from_minio(problem_id)
+    
+    if not test_cases:
+        return _json_error('题目没有测试用例，请联系管理员', status=400)
+    
+    # 获取当前用户
+    user = request.user
+    
+    # 创建提交记录（初始状态为Judging）
+    code_length = len(code.encode('utf-8'))
+    submission = Submission.objects.create(
+        problem=problem,
+        user=user,
+        code=code,
+        language=language,
+        status=Submission.STATUS_JUDGING,
+        code_length=code_length,
+        result={}
+    )
+    
+    try:
+        # 调用通用判题函数，使用题目的时间限制和内存限制
+        judge_result = judge_code(
+            src=code,
+            language=language,
+            test_case=test_cases,
+            max_cpu_time=max_cpu_time,  # 使用题目设置的时间限制
+            max_memory=max_memory,      # 使用题目设置的内存限制
+            output=True
+        )
+        
+        # 处理判题结果
+        if not judge_result.get('success', False):
+            # 判题失败（如编译错误）
+            error_type = judge_result.get('error', 'SystemError')
+            error_message = judge_result.get('message', '判题失败')
+            
+            # 判断错误类型
+            if error_type == 'CompileError':
+                final_status = Submission.STATUS_COMPILE_ERROR
+            else:
+                final_status = Submission.STATUS_SYSTEM_ERROR
+            
+            # 更新提交记录
+            submission.status = final_status
+            submission.result = {
+                'error': error_type,
+                'message': error_message,
+                'data': judge_result.get('data')
+            }
+            submission.save()
+            
+            # 更新题目统计
+            problem_data, _ = ProblemData.objects.get_or_create(problem=problem)
+            problem_data.submission += 1
+            if final_status == Submission.STATUS_COMPILE_ERROR:
+                problem_data.ce += 1
+            problem_data.save()
+            
+            return _json_success('判题完成', data={
+                'submission_id': submission.submission_id,
+                'status': final_status,
+                'status_text': submission.get_status_display(),
+                'judge_result': judge_result
+            })
+        
+        # 判题成功，处理测试用例结果
+        test_results = judge_result.get('data', [])
+        
+        # 计算最终状态：只有所有测试用例都是Accepted才显示Accepted，否则显示第一个错误状态
+        final_status = Submission.STATUS_ACCEPTED
+        first_error_status = None
+        max_cpu_time_used = 0
+        max_memory_used = 0
+        
+        for result in test_results:
+            result_code = result.get('result', -1)
+            cpu_time = result.get('cpu_time', 0)
+            memory = result.get('memory', 0)
+            
+            # 更新最大时间和内存
+            max_cpu_time_used = max(max_cpu_time_used, cpu_time)
+            max_memory_used = max(max_memory_used, memory)
+            
+            # 检查结果状态（只处理第一个错误）
+            if result_code != 0 and first_error_status is None:  # 不是Accepted且还没有记录错误
+                # 记录第一个错误状态
+                if result_code == -1:
+                    first_error_status = Submission.STATUS_WRONG_ANSWER
+                elif result_code == 1 or result_code == 2:
+                    first_error_status = Submission.STATUS_TIME_LIMIT_EXCEEDED
+                elif result_code == 3:
+                    first_error_status = Submission.STATUS_MEMORY_LIMIT_EXCEEDED
+                elif result_code == 4:
+                    first_error_status = Submission.STATUS_RUNTIME_ERROR
+                else:
+                    first_error_status = Submission.STATUS_SYSTEM_ERROR
+        
+        # 如果有错误，使用第一个错误状态；否则使用Accepted
+        if first_error_status is not None:
+            final_status = first_error_status
+        
+        # 更新提交记录
+        submission.status = final_status
+        submission.cpu_time = max_cpu_time_used
+        submission.memory = max_memory_used
+        submission.result = {
+            'test_results': test_results,
+            'total_tests': len(test_results),
+            'passed_tests': sum(1 for r in test_results if r.get('result', -1) == 0)
+        }
+        submission.save()
+        
+        # 更新题目统计
+        problem_data, _ = ProblemData.objects.get_or_create(problem=problem)
+        problem_data.submission += 1
+        
+        if final_status == Submission.STATUS_ACCEPTED:
+            problem_data.ac += 1
+        elif final_status == Submission.STATUS_WRONG_ANSWER:
+            problem_data.wr += 1
+        elif final_status == Submission.STATUS_TIME_LIMIT_EXCEEDED:
+            problem_data.tle += 1
+        elif final_status == Submission.STATUS_MEMORY_LIMIT_EXCEEDED:
+            problem_data.mle += 1
+        elif final_status == Submission.STATUS_RUNTIME_ERROR:
+            problem_data.re += 1
+        elif final_status == Submission.STATUS_COMPILE_ERROR:
+            problem_data.ce += 1
+        
+        problem_data.save()
+        
+        # 更新用户统计
+        user.total_submissions += 1
+        if final_status == Submission.STATUS_ACCEPTED:
+            user.accepted_submissions += 1
+        user.save(update_fields=['total_submissions', 'accepted_submissions'])
+        
+        return _json_success('判题完成', data={
+            'submission_id': submission.submission_id,
+            'status': final_status,
+            'status_text': submission.get_status_display(),
+            'cpu_time': max_cpu_time_used,
+            'memory': max_memory_used,
+            'code_length': code_length,
+            'judge_result': judge_result
+        })
+        
+    except Exception as e:
+        # 判题过程中出现异常
+        submission.status = Submission.STATUS_SYSTEM_ERROR
+        submission.result = {'error': str(e)}
+        submission.save()
+        
+        # 更新题目统计
+        problem_data, _ = ProblemData.objects.get_or_create(problem=problem)
+        problem_data.submission += 1
+        problem_data.save()
+        
+        return _json_error(f'判题失败: {str(e)}', status=500)
+
+
+@csrf_exempt
+@jwt_required
+@require_http_methods(['GET'])
+def get_submission_detail(request, submission_id):
+    """
+    获取提交详情
+    
+    GET /api/problems/submissions/{submission_id}
+    
+    认证: 需要JWT Token
+    
+    返回: 提交详情
+    {
+        "success": true,
+        "message": "获取成功",
+        "data": {
+            "submission_id": int,
+            "problem_id": int,
+            "problem_title": str,
+            "user_id": int,
+            "username": str,
+            "code": str,
+            "language": str,
+            "status": int,
+            "status_text": str,
+            "cpu_time": int,
+            "memory": int,
+            "code_length": int,
+            "submit_time": str,
+            "result": dict
+        }
+    }
+    """
+    try:
+        submission = Submission.objects.select_related('problem', 'user').get(submission_id=submission_id)
+    except Submission.DoesNotExist:
+        return _json_error('提交记录不存在', status=404)
+    
+    # 检查权限：只能查看自己的提交或管理员可以查看所有提交
+    user = request.user
+    if submission.user.id != user.id and (not user.permission or user.permission < 1):
+        return _json_error('无权查看此提交记录', status=403)
+    
+    return _json_success('获取成功', data={
+        'submission_id': submission.submission_id,
+        'problem_id': submission.problem.problem_id,
+        'problem_title': submission.problem.title,
+        'user_id': submission.user.id,
+        'username': submission.user.username,
+        'code': submission.code,
+        'language': submission.language,
+        'status': submission.status,
+        'status_text': submission.get_status_display(),
+        'cpu_time': submission.cpu_time,
+        'memory': submission.memory,
+        'code_length': submission.code_length,
+        'submit_time': submission.submit_time.isoformat(),
+        'result': submission.result
+    })
+
+
+@csrf_exempt
+@jwt_required
+@require_http_methods(['GET'])
+def list_submissions(request):
+    """
+    获取提交记录列表（支持分页、搜索、筛选）
+    
+    GET /api/problems/submissions/list
+    
+    查询参数：
+    - page: 页码（默认1）
+    - page_size: 每页数量（默认20）
+    - problem_id: 题目ID筛选（可选）
+    - user_id: 用户ID筛选（可选）
+    - status: 状态筛选（可选，0=Accepted, -1=Wrong Answer, 1=Time Limit Exceeded, etc.）
+    - language: 语言筛选（可选，cpp, java, python, javascript）
+    
+    认证: 需要JWT Token
+    
+    返回: 提交记录列表
+    {
+        "success": true,
+        "message": "获取成功",
+        "data": {
+            "submissions": [
+                {
+                    "submission_id": int,
+                    "problem_id": int,
+                    "problem_title": str,
+                    "user_id": int,
+                    "username": str,
+                    "language": str,
+                    "status": int,
+                    "status_text": str,
+                    "cpu_time": int,
+                    "memory": int,
+                    "code_length": int,
+                    "submit_time": str
+                }
+            ],
+            "pagination": {
+                "page": int,
+                "page_size": int,
+                "total": int,
+                "total_pages": int,
+                "has_next": bool,
+                "has_previous": bool
+            }
+        }
+    }
+    """
+    from django.core.paginator import Paginator
+    from django.core.paginator import EmptyPage, PageNotAnInteger
+    
+    try:
+        user = request.user
+        
+        # 解析分页与筛选参数
+        raw_page = request.GET.get('page', '1')
+        raw_page_size = request.GET.get('page_size', '20')
+        problem_id = request.GET.get('problem_id')
+        user_id = request.GET.get('user_id')
+        submission_id = request.GET.get('submission_id')
+        status = request.GET.get('status')
+        language = request.GET.get('language')
+        
+        try:
+            page = int(raw_page)
+        except (TypeError, ValueError):
+            page = 1
+        
+        try:
+            page_size = int(raw_page_size)
+        except (TypeError, ValueError):
+            page_size = 20
+        
+        # 限制每页数量
+        if page_size > 100:
+            page_size = 100
+        if page_size < 1:
+            page_size = 20
+        
+        # 构建查询 - 所有人都可以查看所有提交记录
+        queryset = Submission.objects.select_related('problem', 'user').all()
+        
+        # 题目ID筛选
+        if problem_id:
+            try:
+                problem_id = int(problem_id)
+                queryset = queryset.filter(problem_id=problem_id)
+            except (TypeError, ValueError):
+                pass
+        
+        # 用户ID筛选（所有人都可以使用）
+        if user_id:
+            try:
+                user_id = int(user_id)
+                queryset = queryset.filter(user_id=user_id)
+            except (TypeError, ValueError):
+                pass
+        
+        # 测评ID筛选
+        if submission_id:
+            try:
+                submission_id = int(submission_id)
+                queryset = queryset.filter(submission_id=submission_id)
+            except (TypeError, ValueError):
+                pass
+        
+        # 状态筛选
+        if status is not None:
+            try:
+                status = int(status)
+                queryset = queryset.filter(status=status)
+            except (TypeError, ValueError):
+                pass
+        
+        # 语言筛选
+        if language:
+            queryset = queryset.filter(language=language)
+        
+        # 按提交时间倒序排列
+        queryset = queryset.order_by('-submit_time')
+        
+        # 分页
+        paginator = Paginator(queryset, page_size)
+        total = paginator.count
+        total_pages = paginator.num_pages if total > 0 else 0
+        
+        try:
+            submissions_page = paginator.page(page)
+        except (EmptyPage, PageNotAnInteger):
+            submissions_page = paginator.page(1)
+            page = 1
+        
+        # 序列化提交记录
+        submissions_data = []
+        for submission in submissions_page:
+            submissions_data.append({
+                'submission_id': submission.submission_id,
+                'problem_id': submission.problem.problem_id,
+                'problem_title': submission.problem.title,
+                'user_id': submission.user.id,
+                'username': submission.user.username,
+                'language': submission.language,
+                'status': submission.status,
+                'status_text': submission.get_status_display(),
+                'cpu_time': submission.cpu_time,
+                'memory': submission.memory,
+                'code_length': submission.code_length,
+                'submit_time': submission.submit_time.isoformat()
+            })
+        
+        return _json_success('获取成功', data={
+            'submissions': submissions_data,
+            'pagination': {
+                'page': page,
+                'page_size': page_size,
+                'total': total,
+                'total_pages': total_pages,
+                'has_next': submissions_page.has_next() if total > 0 else False,
+                'has_previous': submissions_page.has_previous() if total > 0 else False
+            }
+        })
+    
+    except Exception as e:
+        import traceback
+        print(f"获取提交记录失败: {str(e)}")
+        print(traceback.format_exc())
+        return _json_error(f'获取提交记录失败: {str(e)}', status=500)

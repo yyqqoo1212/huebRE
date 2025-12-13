@@ -282,3 +282,7 @@ AWS_S3_OBJECT_PARAMETERS = {  # 能提升访问速度
     "CacheControl": "max-age=86400",
 }
 AWS_QUERYSTRING_AUTH = env_bool('AWS_QUERYSTRING_AUTH', False)  # 如果使用自签名证书，设为False
+
+# 判题机配置
+JUDGE_SERVER_URL = os.getenv('JUDGE_SERVER_URL', 'http://101.42.172.229:12358')
+JUDGE_SERVER_TOKEN = os.getenv('JUDGE_SERVER_TOKEN', 'OYg4fMThGAjH80rojURhEz5GOBgSlMVm')

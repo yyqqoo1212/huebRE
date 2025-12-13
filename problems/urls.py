@@ -33,6 +33,21 @@ urlpatterns = [
 
     # 清空题目测评数据
     path('<int:problem_id>/testcases/clear', views.clear_problem_testcases, name='problem-clear-testcases'),
+    
+    # 运行自测
+    path('<int:problem_id>/run-test', views.run_test, name='problem-run-test'),
+    
+    # 提交代码进行判题（使用题目的时间限制和内存限制）
+    path('<int:problem_id>/submit', views.submit_code, name='problem-submit'),
+    
+    # 通用判题接口（返回完整JSON结果）
+    path('judge', views.judge, name='problem-judge'),
+    
+    # 获取提交列表
+    path('submissions/list', views.list_submissions, name='submission-list'),
+    
+    # 获取提交详情
+    path('submissions/<int:submission_id>', views.get_submission_detail, name='submission-detail'),
 ]
 
 
