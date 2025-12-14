@@ -1635,8 +1635,20 @@ def submit_code(request, problem_id):
         
         # 更新用户统计
         user.total_submissions += 1
+        
+        # 只有当本次提交是Accepted，且该用户之前没有这道题目的Accepted记录时，才增加accepted_submissions
         if final_status == Submission.STATUS_ACCEPTED:
-            user.accepted_submissions += 1
+            # 检查该用户是否已经有过这道题目的Accepted提交（排除当前提交）
+            has_previous_accepted = Submission.objects.filter(
+                problem=problem,
+                user=user,
+                status=Submission.STATUS_ACCEPTED
+            ).exclude(submission_id=submission.submission_id).exists()
+            
+            # 如果之前没有Accepted记录，才增加accepted_submissions
+            if not has_previous_accepted:
+                user.accepted_submissions += 1
+        
         user.save(update_fields=['total_submissions', 'accepted_submissions'])
         
         return _json_success('判题完成', data={
