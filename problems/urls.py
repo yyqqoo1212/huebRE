@@ -40,9 +40,6 @@ urlpatterns = [
     # 提交代码进行判题（使用题目的时间限制和内存限制）
     path('<int:problem_id>/submit', views.submit_code, name='problem-submit'),
     
-    # 通用判题接口（返回完整JSON结果）
-    path('judge', views.judge, name='problem-judge'),
-    
     # 获取提交列表
     path('submissions/list', views.list_submissions, name='submission-list'),
     
