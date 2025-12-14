@@ -1452,3 +1452,54 @@ def list_users(request):
         return _json_error(f'参数错误: {str(e)}', status=400, code='invalid_request')
     except Exception as e:
         return _json_error(f'获取用户列表失败: {str(e)}', status=500, code='server_error')
+
+
+@csrf_exempt
+@require_http_methods(['GET'])
+def get_ranking(request):
+    """
+    获取排行榜（按做题量排序）
+    
+    GET /api/users/ranking - 获取排行榜
+    
+    请求参数（URL参数）:
+    - page: 页码（可选，默认1）
+    - page_size: 每页数量（可选，默认20）
+    
+    返回: 排行榜数据，按accepted_submissions降序排列，只包含accepted_submissions > 0的用户
+    """
+    try:
+        # 获取查询参数
+        page = int(request.GET.get('page', 1))
+        page_size = int(request.GET.get('page_size', 20))
+        
+        # 只查询accepted_submissions > 0的用户，按accepted_submissions降序排列
+        query = User.objects.filter(accepted_submissions__gt=0).order_by('-accepted_submissions', 'id')
+        
+        # 计算分页
+        total = query.count()
+        total_pages = (total + page_size - 1) // page_size if total > 0 else 0
+        
+        # 分页查询
+        offset = (page - 1) * page_size
+        users = query[offset:offset + page_size]
+        
+        # 序列化用户数据
+        users_data = [_serialize_user(user) for user in users]
+        
+        return _json_success('获取成功', data={
+            'users': users_data,
+            'pagination': {
+                'page': page,
+                'page_size': page_size,
+                'total': total,
+                'total_pages': total_pages,
+                'has_next': page < total_pages,
+                'has_previous': page > 1
+            }
+        })
+        
+    except ValueError as e:
+        return _json_error(f'参数错误: {str(e)}', status=400, code='invalid_request')
+    except Exception as e:
+        return _json_error(f'获取排行榜失败: {str(e)}', status=500, code='server_error')
