@@ -30,6 +30,9 @@ urlpatterns = [
     # 题目相关API
     path('api/problems/', include('problems.urls')),
 
+    # 讨论区相关API
+    path('api/discussions/', include('discussions.urls')),
+
     # Minio文件存储相关API
     path('api/files/upload', storage_views.upload_file, name='file-upload'),
     path('api/files/upload-temp', storage_views.upload_temp_file, name='file-upload-temp'),
