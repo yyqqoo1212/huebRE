@@ -73,6 +73,7 @@ INSTALLED_APPS = [
     'users',
     'problems',
     'discussions',
+    'contest',
 ]
 
 MIDDLEWARE = [
@@ -227,7 +228,8 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = 'en-us'
 
-TIME_ZONE = 'UTC'
+# 使用东八区作为默认时区，保证前端提交的本地时间按中国时区解析
+TIME_ZONE = 'Asia/Shanghai'
 
 USE_I18N = True
 
