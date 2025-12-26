@@ -13,7 +13,8 @@ from .models import (
     ContestTimeConfig,
     ContestRuleConfig,
     ContestPermissionConfig,
-    ContestStatistics
+    ContestStatistics,
+    ContestAnnouncement
 )
 from users.views import _json_error, _json_success, _parse_request_body, jwt_required
 
@@ -554,6 +555,399 @@ def update_contest(request, contest_id):
         data={
             'contest_id': contest.contest_id,
             'contest_name': contest.contest_name,
+        },
+        status=200,
+    )
+
+
+@csrf_exempt
+@jwt_required
+@require_http_methods(['DELETE'])
+def delete_contest(request, contest_id):
+    """
+    删除比赛
+    
+    DELETE /api/contests/delete/<contest_id>
+    
+    删除比赛及其所有相关数据：
+    - Contest (主表)
+    - ContestTimeConfig (自动级联删除)
+    - ContestRuleConfig (自动级联删除)
+    - ContestPermissionConfig (自动级联删除)
+    - ContestStatistics (自动级联删除)
+    
+    预留接口：如果以后有其他需要手动删除的关联数据，可以在 _delete_contest_related_data 函数中添加
+    """
+    try:
+        contest_id = int(contest_id)
+    except (TypeError, ValueError):
+        return _json_error('比赛ID格式错误', status=400)
+    
+    user = request.user
+    if not user:
+        return _json_error('用户未登录', status=401)
+    
+    try:
+        contest = Contest.objects.get(contest_id=contest_id)
+    except Contest.DoesNotExist:
+        return _json_error('比赛不存在', status=404)
+    
+    # 保存比赛名称用于返回信息
+    contest_name = contest.contest_name
+    
+    try:
+        with transaction.atomic():
+            # 删除相关数据（预留扩展接口）
+            # 当前由于使用了 CASCADE，删除 Contest 时会自动删除所有关联表
+            # 如果以后有其他需要手动删除的数据（如文件、缓存等），可以在这里添加
+            _delete_contest_related_data(contest)
+            
+            # 删除比赛主表（会自动级联删除所有关联表）
+            contest.delete()
+            
+    except Exception as exc:
+        return _json_error(f'删除比赛失败: {str(exc)}', status=500, code='db_error')
+    
+    return _json_success(
+        '删除比赛成功',
+        data={
+            'contest_id': contest_id,
+            'contest_name': contest_name,
+        },
+        status=200,
+    )
+
+
+def _delete_contest_related_data(contest: Contest):
+    """
+    删除比赛相关数据（预留扩展接口）
+    
+    当前所有关联表都使用了 CASCADE 删除，删除 Contest 时会自动删除。
+    如果以后有以下情况需要手动删除，可以在此函数中添加：
+    - 文件资源（如比赛图片、附件等）
+    - 缓存数据
+    - 其他非数据库关联的数据
+    - 消息队列任务
+    
+    参数:
+        contest: Contest 实例
+    """
+    # TODO: 如果以后有其他需要手动删除的数据，可以在这里添加
+    # 例如：
+    # - 删除比赛相关的文件
+    # - 清理缓存
+    # - 取消相关的定时任务
+    # - 删除比赛相关的消息队列任务
+    pass
+
+
+@csrf_exempt
+@require_http_methods(['GET'])
+def get_contest_announcements(request, contest_id):
+    """
+    获取比赛公告列表
+    
+    GET /api/contests/<contest_id>/announcements
+    """
+    try:
+        contest_id = int(contest_id)
+    except (TypeError, ValueError):
+        return _json_error('比赛ID格式错误', status=400)
+    
+    try:
+        contest = Contest.objects.get(contest_id=contest_id)
+    except Contest.DoesNotExist:
+        return _json_error('比赛不存在', status=404)
+    
+    # 获取该比赛的所有公告，按重要性和时间排序
+    announcements = ContestAnnouncement.objects.filter(contest=contest).order_by('-is_important', '-create_time')
+    
+    # 获取所有发布人ID，批量查询用户信息
+    publisher_ids = [ann.publisher_id for ann in announcements if ann.publisher_id]
+    from users.models import User
+    publishers = {user.id: user.username for user in User.objects.filter(id__in=publisher_ids)} if publisher_ids else {}
+    
+    announcements_list = []
+    for ann in announcements:
+        announcements_list.append({
+            'id': ann.id,
+            'title': ann.title,
+            'content': ann.content,
+            'is_important': ann.is_important,
+            'publisher_id': ann.publisher_id,
+            'publisher_name': publishers.get(ann.publisher_id, '系统'),
+            'create_time': ann.create_time.isoformat() if ann.create_time else None,
+            'update_time': ann.update_time.isoformat() if ann.update_time else None,
+        })
+    
+    return _json_success(
+        '获取比赛公告列表成功',
+        data={
+            'announcements': announcements_list
+        }
+    )
+
+
+@csrf_exempt
+@jwt_required
+@require_http_methods(['POST'])
+def create_contest_announcement(request, contest_id):
+    """
+    创建比赛公告
+    
+    POST /api/contests/<contest_id>/announcements
+    
+    请求体（JSON）：
+    {
+        "title": "公告标题",
+        "content": "公告内容",
+        "is_important": false
+    }
+    """
+    try:
+        contest_id = int(contest_id)
+    except (TypeError, ValueError):
+        return _json_error('比赛ID格式错误', status=400)
+    
+    user = request.user
+    if not user:
+        return _json_error('用户未登录', status=401)
+    
+    # 检查用户权限：permission为1（管理员）或2（超级管理员）
+    user_permission = getattr(user, 'permission', 0)
+    try:
+        user_permission = int(user_permission)
+    except (TypeError, ValueError):
+        user_permission = 0
+    
+    if user_permission not in [1, 2]:
+        return _json_error('权限不足，需要管理员权限', status=403)
+    
+    try:
+        data = _parse_request_body(request)
+    except ValueError as exc:
+        return _json_error(str(exc), status=400, code='bad_json')
+    
+    title = (data.get('title') or '').strip()
+    if not title:
+        return _json_error('公告标题不能为空', status=400)
+    
+    content = (data.get('content') or '').strip()
+    if not content:
+        return _json_error('公告内容不能为空', status=400)
+    
+    is_important = data.get('is_important', False)
+    
+    try:
+        contest = Contest.objects.get(contest_id=contest_id)
+    except Contest.DoesNotExist:
+        return _json_error('比赛不存在', status=404)
+    
+    try:
+        announcement = ContestAnnouncement.objects.create(
+            contest=contest,
+            title=title,
+            content=content,
+            is_important=is_important,
+            publisher_id=user.id,
+        )
+    except Exception as exc:
+        return _json_error(f'创建公告失败: {str(exc)}', status=500, code='db_error')
+    
+    return _json_success(
+        '创建公告成功',
+        data={
+            'id': announcement.id,
+            'title': announcement.title,
+            'content': announcement.content,
+            'is_important': announcement.is_important,
+            'publisher_id': announcement.publisher_id,
+            'publisher_name': user.username,
+            'create_time': announcement.create_time.isoformat() if announcement.create_time else None,
+        },
+        status=201,
+    )
+
+
+@csrf_exempt
+@require_http_methods(['GET'])
+def get_contest_announcement_detail(request, contest_id, announcement_id):
+    """
+    获取比赛公告详情
+    
+    GET /api/contests/<contest_id>/announcements/<announcement_id>
+    """
+    try:
+        contest_id = int(contest_id)
+        announcement_id = int(announcement_id)
+    except (TypeError, ValueError):
+        return _json_error('ID格式错误', status=400)
+    
+    try:
+        contest = Contest.objects.get(contest_id=contest_id)
+    except Contest.DoesNotExist:
+        return _json_error('比赛不存在', status=404)
+    
+    try:
+        announcement = ContestAnnouncement.objects.get(id=announcement_id, contest=contest)
+    except ContestAnnouncement.DoesNotExist:
+        return _json_error('公告不存在', status=404)
+    
+    # 获取发布人信息
+    publisher_name = '系统'
+    if announcement.publisher_id:
+        try:
+            from users.models import User
+            publisher = User.objects.get(id=announcement.publisher_id)
+            publisher_name = publisher.username
+        except User.DoesNotExist:
+            pass
+    
+    return _json_success(
+        '获取公告详情成功',
+        data={
+            'id': announcement.id,
+            'title': announcement.title,
+            'content': announcement.content,
+            'is_important': announcement.is_important,
+            'publisher_id': announcement.publisher_id,
+            'publisher_name': publisher_name,
+            'create_time': announcement.create_time.isoformat() if announcement.create_time else None,
+            'update_time': announcement.update_time.isoformat() if announcement.update_time else None,
+        }
+    )
+
+
+@csrf_exempt
+@jwt_required
+@require_http_methods(['PUT'])
+def update_contest_announcement(request, contest_id, announcement_id):
+    """
+    更新比赛公告（仅允许发布人编辑）
+    
+    PUT /api/contests/<contest_id>/announcements/<announcement_id>
+    
+    请求体（JSON）：
+    {
+        "title": "公告标题",
+        "content": "公告内容",
+        "is_important": false
+    }
+    """
+    try:
+        contest_id = int(contest_id)
+        announcement_id = int(announcement_id)
+    except (TypeError, ValueError):
+        return _json_error('ID格式错误', status=400)
+    
+    user = request.user
+    if not user:
+        return _json_error('用户未登录', status=401)
+    
+    try:
+        data = _parse_request_body(request)
+    except ValueError as exc:
+        return _json_error(str(exc), status=400, code='bad_json')
+    
+    try:
+        contest = Contest.objects.get(contest_id=contest_id)
+    except Contest.DoesNotExist:
+        return _json_error('比赛不存在', status=404)
+    
+    try:
+        announcement = ContestAnnouncement.objects.get(id=announcement_id, contest=contest)
+    except ContestAnnouncement.DoesNotExist:
+        return _json_error('公告不存在', status=404)
+    
+    # 检查用户是否是公告的发布人
+    if announcement.publisher_id != user.id:
+        return _json_error('权限不足，只能编辑自己发布的公告', status=403)
+    
+    title = (data.get('title') or '').strip()
+    if not title:
+        return _json_error('公告标题不能为空', status=400)
+    
+    content = (data.get('content') or '').strip()
+    if not content:
+        return _json_error('公告内容不能为空', status=400)
+    
+    is_important = data.get('is_important', False)
+    
+    try:
+        announcement.title = title
+        announcement.content = content
+        announcement.is_important = is_important
+        announcement.save(update_fields=['title', 'content', 'is_important', 'update_time'])
+    except Exception as exc:
+        return _json_error(f'更新公告失败: {str(exc)}', status=500, code='db_error')
+    
+    return _json_success(
+        '更新公告成功',
+        data={
+            'id': announcement.id,
+            'title': announcement.title,
+            'content': announcement.content,
+            'is_important': announcement.is_important,
+            'publisher_id': announcement.publisher_id,
+            'publisher_name': user.username,
+            'create_time': announcement.create_time.isoformat() if announcement.create_time else None,
+            'update_time': announcement.update_time.isoformat() if announcement.update_time else None,
+        },
+        status=200,
+    )
+
+
+@csrf_exempt
+@jwt_required
+@require_http_methods(['DELETE'])
+def delete_contest_announcement(request, contest_id, announcement_id):
+    """
+    删除比赛公告（仅允许发布人删除）
+    
+    DELETE /api/contests/<contest_id>/announcements/<announcement_id>
+    """
+    try:
+        contest_id = int(contest_id)
+        announcement_id = int(announcement_id)
+    except (TypeError, ValueError):
+        return _json_error('ID格式错误', status=400)
+    
+    user = request.user
+    if not user:
+        return _json_error('用户未登录', status=401)
+    
+    try:
+        contest = Contest.objects.get(contest_id=contest_id)
+    except Contest.DoesNotExist:
+        return _json_error('比赛不存在', status=404)
+    
+    try:
+        announcement = ContestAnnouncement.objects.get(id=announcement_id, contest=contest)
+    except ContestAnnouncement.DoesNotExist:
+        return _json_error('公告不存在', status=404)
+    
+    # 检查用户权限：管理员（permission为1或2）可以删除任何公告，普通用户只能删除自己发布的公告
+    user_permission = getattr(user, 'permission', 0)
+    try:
+        user_permission = int(user_permission)
+    except (TypeError, ValueError):
+        user_permission = 0
+    
+    # 如果不是管理员且不是发布人，则无权限
+    if user_permission not in [1, 2] and announcement.publisher_id != user.id:
+        return _json_error('权限不足，只能删除自己发布的公告', status=403)
+    
+    try:
+        announcement_title = announcement.title
+        announcement.delete()
+    except Exception as exc:
+        return _json_error(f'删除公告失败: {str(exc)}', status=500, code='db_error')
+    
+    return _json_success(
+        '删除公告成功',
+        data={
+            'id': announcement_id,
+            'title': announcement_title
         },
         status=200,
     )
