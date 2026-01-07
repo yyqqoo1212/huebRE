@@ -14,7 +14,8 @@ from .models import (
     ContestRuleConfig,
     ContestPermissionConfig,
     ContestStatistics,
-    ContestAnnouncement
+    ContestAnnouncement,
+    ContestProblem
 )
 from users.views import _json_error, _json_success, _parse_request_body, jwt_required
 
@@ -948,6 +949,360 @@ def delete_contest_announcement(request, contest_id, announcement_id):
         data={
             'id': announcement_id,
             'title': announcement_title
+        },
+        status=200,
+    )
+
+
+@csrf_exempt
+@require_http_methods(['GET'])
+def get_contest_problems(request, contest_id):
+    """
+    获取比赛题目列表
+    
+    GET /api/contests/<contest_id>/problems
+    """
+    try:
+        contest_id = int(contest_id)
+    except (TypeError, ValueError):
+        return _json_error('比赛ID格式错误', status=400)
+    
+    try:
+        contest = Contest.objects.get(contest_id=contest_id)
+    except Contest.DoesNotExist:
+        return _json_error('比赛不存在', status=404)
+    
+    # 获取该比赛的所有题目，按display_order排序
+    problems = ContestProblem.objects.filter(contest=contest).order_by('display_order')
+    
+    problems_list = []
+    for problem in problems:
+        problems_list.append({
+            'id': problem.id,
+            'problem_id': problem.problem.problem_id if problem.problem else None,
+            'display_order': problem.display_order,
+            'display_title': problem.display_title,
+            'color': problem.color or '',
+            'score': problem.score,
+            'accept_count': problem.accept_count,
+            'submit_count': problem.submit_count,
+        })
+    
+    return _json_success(
+        '获取比赛题目列表成功',
+        data={
+            'problems': problems_list
+        }
+    )
+
+
+@csrf_exempt
+@require_http_methods(['GET'])
+def get_problem_bank(request):
+    """
+    获取题库列表（用于比赛添加题目）
+    
+    GET /api/contests/problem-bank
+    
+    查询参数：
+    - page: 页码（默认1）
+    - page_size: 每页数量（默认10）
+    - search: 搜索关键词（题号或标题）
+    """
+    from django.core.paginator import Paginator
+    from problems.models import Problem, ProblemData
+    
+    # 解析分页与筛选参数
+    raw_page = request.GET.get('page', '1')
+    raw_page_size = request.GET.get('page_size', '10')
+    search = (request.GET.get('search', '') or '').strip()
+
+    try:
+        page = int(raw_page)
+    except (TypeError, ValueError):
+        page = 1
+
+    try:
+        page_size = int(raw_page_size)
+    except (TypeError, ValueError):
+        page_size = 10
+    
+    # 限制每页数量
+    if page_size > 100:
+        page_size = 100
+    if page_size < 1:
+        page_size = 10
+    
+    # 构建查询 - 获取公开题目
+    queryset = ProblemData.objects.select_related('problem').filter(auth=Problem.PUBLIC)
+    
+    # 搜索筛选（题号或标题）
+    if search:
+        try:
+            # 尝试将搜索词转换为整数（题号搜索）
+            problem_id = int(search)
+            queryset = queryset.filter(problem__problem_id=problem_id)
+        except (TypeError, ValueError):
+            # 标题搜索
+            queryset = queryset.filter(title__icontains=search)
+    
+    # 按题号倒序排序
+    queryset = queryset.order_by('-problem__problem_id')
+    
+    # 分页
+    paginator = Paginator(queryset, page_size)
+    
+    try:
+        page_obj = paginator.page(page)
+    except Exception:
+        return _json_error('页码超出范围', status=400)
+    
+    # 构建返回数据
+    problems = []
+    for problem_data in page_obj.object_list:
+        problem = problem_data.problem
+        problems.append({
+            'id': problem.problem_id,
+            'title': problem_data.title,
+        })
+    
+    return _json_success(
+        '获取题库列表成功',
+        data={
+            'problems': problems,
+            'pagination': {
+                'page': page,
+                'page_size': page_size,
+                'total': paginator.count,
+                'total_pages': paginator.num_pages,
+                'has_next': page_obj.has_next(),
+                'has_previous': page_obj.has_previous(),
+            }
+        }
+    )
+
+
+@csrf_exempt
+@jwt_required
+@require_http_methods(['POST'])
+def add_problem_to_contest(request, contest_id):
+    """
+    添加题目到比赛
+    
+    POST /api/contests/<contest_id>/problems/add
+    
+    请求体（JSON）：
+    {
+        "problem_id": 1,
+        "display_title": "题目标题"  // 可选，不提供则使用题目原标题
+    }
+    """
+    try:
+        contest_id = int(contest_id)
+    except (TypeError, ValueError):
+        return _json_error('比赛ID格式错误', status=400)
+    
+    user = request.user
+    if not user:
+        return _json_error('用户未登录', status=401)
+    
+    try:
+        data = _parse_request_body(request)
+    except ValueError as exc:
+        return _json_error(str(exc), status=400, code='bad_json')
+    
+    problem_id = data.get('problem_id')
+    if not problem_id:
+        return _json_error('题目ID不能为空', status=400)
+    
+    try:
+        problem_id = int(problem_id)
+    except (TypeError, ValueError):
+        return _json_error('题目ID格式错误', status=400)
+    
+    try:
+        contest = Contest.objects.get(contest_id=contest_id)
+    except Contest.DoesNotExist:
+        return _json_error('比赛不存在', status=404)
+    
+    # 检查题目是否存在
+    from problems.models import Problem, ProblemData
+    try:
+        problem = Problem.objects.get(problem_id=problem_id)
+        problem_data = ProblemData.objects.get(problem=problem)
+    except Problem.DoesNotExist:
+        return _json_error('题目不存在', status=404)
+    except ProblemData.DoesNotExist:
+        return _json_error('题目数据不存在', status=404)
+    
+    # 检查题目是否已经在比赛中
+    if ContestProblem.objects.filter(contest=contest, problem=problem).exists():
+        return _json_error('该题目已在比赛中', status=400)
+    
+    try:
+        with transaction.atomic():
+            # 自动生成 display_order（按字母顺序：A, B, C...）
+            existing_problems = ContestProblem.objects.filter(contest=contest).order_by('display_order')
+            if existing_problems.exists():
+                # 获取最后一个题目的序号
+                last_order = existing_problems.last().display_order
+                # 生成下一个序号
+                if last_order.isalpha() and len(last_order) == 1:
+                    # 如果是单个字母，生成下一个字母
+                    next_char = chr(ord(last_order) + 1)
+                    display_order = next_char
+                else:
+                    # 如果不是标准格式，使用数字
+                    display_order = str(existing_problems.count() + 1)
+            else:
+                # 第一道题目，使用 A
+                display_order = 'A'
+            
+            # 使用提供的标题或原标题
+            display_title = data.get('display_title', '').strip()
+            if not display_title:
+                display_title = problem_data.title
+            
+            # 创建比赛题目关联
+            contest_problem = ContestProblem.objects.create(
+                contest=contest,
+                problem=problem,
+                display_order=display_order,
+                display_title=display_title,
+                score=100,  # IOI/OI赛制分数，默认为空
+                color=None,  # ACM赛制气球颜色，默认为空
+                accept_count=0,
+                submit_count=0,
+                first_blood_user_id=None,
+                first_blood_time=None,
+            )
+            
+            # 更新比赛统计信息
+            statistics, created = ContestStatistics.objects.get_or_create(contest=contest)
+            statistics.problem_count = ContestProblem.objects.filter(contest=contest).count()
+            statistics.save()
+            
+    except Exception as exc:
+        return _json_error(f'添加题目失败: {str(exc)}', status=500, code='db_error')
+    
+    return _json_success(
+        '添加题目成功',
+        data={
+            'id': contest_problem.id,
+            'problem_id': problem.problem_id,
+            'display_order': contest_problem.display_order,
+            'display_title': contest_problem.display_title,
+        },
+        status=201,
+    )
+
+
+@csrf_exempt
+@jwt_required
+@require_http_methods(['DELETE'])
+def delete_contest_problem(request, contest_id, problem_relation_id):
+    """
+    删除比赛题目关联（不删除原题目）
+    
+    DELETE /api/contests/<contest_id>/problems/<problem_relation_id>/delete
+    """
+    try:
+        contest_id = int(contest_id)
+        problem_relation_id = int(problem_relation_id)
+    except (TypeError, ValueError):
+        return _json_error('ID格式错误', status=400)
+    
+    user = request.user
+    if not user:
+        return _json_error('用户未登录', status=401)
+    
+    try:
+        contest = Contest.objects.get(contest_id=contest_id)
+    except Contest.DoesNotExist:
+        return _json_error('比赛不存在', status=404)
+    
+    try:
+        contest_problem = ContestProblem.objects.get(id=problem_relation_id, contest=contest)
+    except ContestProblem.DoesNotExist:
+        return _json_error('比赛题目关联不存在', status=404)
+    
+    try:
+        with transaction.atomic():
+            problem_title = contest_problem.display_title
+            contest_problem.delete()
+            
+            # 更新比赛统计信息
+            statistics, created = ContestStatistics.objects.get_or_create(contest=contest)
+            statistics.problem_count = ContestProblem.objects.filter(contest=contest).count()
+            statistics.save()
+            
+    except Exception as exc:
+        return _json_error(f'删除题目失败: {str(exc)}', status=500, code='db_error')
+    
+    return _json_success(
+        '删除题目成功',
+        data={
+            'id': problem_relation_id,
+            'title': problem_title,
+        },
+        status=200,
+    )
+
+
+@csrf_exempt
+@jwt_required
+@require_http_methods(['PUT'])
+def update_contest_problem_color(request, contest_id, problem_relation_id):
+    """
+    更新比赛题目气球颜色
+    
+    PUT /api/contests/<contest_id>/problems/<problem_relation_id>/color
+    
+    请求体（JSON）：
+    {
+        "color": "#FF0000"
+    }
+    """
+    try:
+        contest_id = int(contest_id)
+        problem_relation_id = int(problem_relation_id)
+    except (TypeError, ValueError):
+        return _json_error('ID格式错误', status=400)
+    
+    user = request.user
+    if not user:
+        return _json_error('用户未登录', status=401)
+    
+    try:
+        data = _parse_request_body(request)
+    except ValueError as exc:
+        return _json_error(str(exc), status=400, code='bad_json')
+    
+    color = data.get('color', '').strip()
+    if not color:
+        return _json_error('颜色值不能为空', status=400)
+    
+    try:
+        contest = Contest.objects.get(contest_id=contest_id)
+    except Contest.DoesNotExist:
+        return _json_error('比赛不存在', status=404)
+    
+    try:
+        contest_problem = ContestProblem.objects.get(id=problem_relation_id, contest=contest)
+    except ContestProblem.DoesNotExist:
+        return _json_error('比赛题目关联不存在', status=404)
+    
+    try:
+        contest_problem.color = color
+        contest_problem.save(update_fields=['color', 'update_time'])
+    except Exception as exc:
+        return _json_error(f'更新颜色失败: {str(exc)}', status=500, code='db_error')
+    
+    return _json_success(
+        '更新颜色成功',
+        data={
+            'id': contest_problem.id,
+            'color': contest_problem.color,
         },
         status=200,
     )
