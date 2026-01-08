@@ -47,7 +47,30 @@ def list_problems(request):
     raw_page_size = request.GET.get('page_size', '20')
     search = (request.GET.get('search', '') or '').strip()
     level = request.GET.get('level')
-    auth = request.GET.get('auth')
+    
+    # 支持多值 auth 查询（例如 ?auth=1,2 或 ?auth=1&auth=3），默认公开
+    raw_auth_values = request.GET.getlist('auth')
+    if not raw_auth_values:
+        raw_auth_values = [request.GET.get('auth', Problem.PUBLIC)]
+    
+    auth_values = []
+    for raw_value in raw_auth_values:
+        if raw_value is None:
+            continue
+        for token in str(raw_value).split(','):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                parsed = int(token)
+            except (TypeError, ValueError):
+                continue
+            if parsed in (Problem.PUBLIC, Problem.PRIVATE, Problem.CONTEST):
+                auth_values.append(parsed)
+    
+    # 至少保证一个有效值，避免空列表导致查询错误
+    if not auth_values:
+        auth_values = [Problem.PUBLIC]
 
     try:
         page = int(raw_page)
@@ -66,7 +89,7 @@ def list_problems(request):
         page_size = 20
     
     # 构建查询
-    queryset = ProblemData.objects.select_related('problem').filter(auth=Problem.PUBLIC)
+    queryset = ProblemData.objects.select_related('problem').filter(auth__in=auth_values)
     
     # 难度筛选
     if level:
@@ -74,15 +97,6 @@ def list_problems(request):
             level = int(level)
             if level in (ProblemData.LEVEL_EASY, ProblemData.LEVEL_MEDIUM, ProblemData.LEVEL_HARD):
                 queryset = queryset.filter(level=level)
-        except (TypeError, ValueError):
-            pass
-    
-    # 权限筛选
-    if auth:
-        try:
-            auth = int(auth)
-            if auth in (Problem.PUBLIC, Problem.PRIVATE, Problem.CONTEST):
-                queryset = queryset.filter(auth=auth)
         except (TypeError, ValueError):
             pass
     
@@ -244,6 +258,7 @@ def get_problem_detail(request, problem_id):
             'pass_rate': round(pass_rate, 1),
             'tags': tags,
             'score': problem_data.score,
+            'auth': problem_data.auth,  # 添加权限字段
             'author': problem.author,
             'create_time': problem.create_time.strftime('%Y-%m-%d %H:%M:%S') if problem.create_time else None,
         }
