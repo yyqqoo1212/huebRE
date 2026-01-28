@@ -3,6 +3,7 @@
 from django.db import IntegrityError, transaction
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
+from django.utils.timezone import localtime
 
 from django.http import HttpResponse, JsonResponse
 from django.core.files.uploadedfile import UploadedFile
@@ -145,7 +146,7 @@ def list_problems(request):
             'id': problem.problem_id,
             'title': problem_data.title,
             'author': problem.author,
-            'create_time': problem.create_time.strftime('%Y-%m-%d %H:%M:%S') if problem.create_time else None,
+            'create_time': localtime(problem.create_time).strftime('%Y-%m-%d %H:%M:%S') if problem.create_time else None,
             'auth': problem_data.auth,
             'tags': tags,
             'difficulty': level_map.get(problem_data.level, 'easy'),
@@ -260,7 +261,7 @@ def get_problem_detail(request, problem_id):
             'score': problem_data.score,
             'auth': problem_data.auth,  # 添加权限字段
             'author': problem.author,
-            'create_time': problem.create_time.strftime('%Y-%m-%d %H:%M:%S') if problem.create_time else None,
+            'create_time': localtime(problem.create_time).strftime('%Y-%m-%d %H:%M:%S') if problem.create_time else None,
         }
     )
 

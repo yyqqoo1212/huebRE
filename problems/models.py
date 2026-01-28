@@ -1,4 +1,13 @@
 from django.db import models
+from django.utils import timezone
+
+
+def _problem_create_time_default():
+    """写入数据库时使用东八区（Asia/Shanghai）本地时间，便于直接查库看到正确时间。"""
+    return timezone.make_naive(
+        timezone.localtime(timezone.now()),
+        timezone.get_current_timezone()
+    )
 
 
 class Problem(models.Model):
@@ -18,7 +27,7 @@ class Problem(models.Model):
 
     problem_id = models.AutoField(primary_key=True, verbose_name='题目ID')
     author = models.CharField(max_length=100, verbose_name='题目作者')
-    create_time = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    create_time = models.DateTimeField(default=_problem_create_time_default, verbose_name='创建时间')
     title = models.CharField(max_length=255, verbose_name='题目标题')
     content = models.TextField(blank=True, verbose_name='题目描述')
     input_description = models.TextField(blank=True, verbose_name='输入描述')

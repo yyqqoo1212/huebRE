@@ -972,8 +972,8 @@ def get_contest_problems(request, contest_id):
     except Contest.DoesNotExist:
         return _json_error('比赛不存在', status=404)
     
-    # 获取该比赛的所有题目，按display_order排序
-    problems = ContestProblem.objects.filter(contest=contest).order_by('display_order')
+    # 获取该比赛的所有题目，按display_order排序；select_related 避免 N+1
+    problems = ContestProblem.objects.filter(contest=contest).select_related('problem').order_by('display_order')
     
     problems_list = []
     for problem in problems:
@@ -992,6 +992,95 @@ def get_contest_problems(request, contest_id):
         '获取比赛题目列表成功',
         data={
             'problems': problems_list
+        }
+    )
+
+
+@csrf_exempt
+@require_http_methods(['GET'])
+def get_contest_problem_detail(request, contest_id, problem_id):
+    """
+    获取比赛题目详情（带比赛上下文，不校验题目 auth，用于比赛题目类型题目）
+
+    GET /api/contests/<contest_id>/problems/<problem_id>
+    problem_id 为题库题目 ID（Problem.problem_id）
+    """
+    from problems.models import Problem, ProblemData
+
+    try:
+        contest_id = int(contest_id)
+        problem_id = int(problem_id)
+    except (TypeError, ValueError):
+        return _json_error('ID格式错误', status=400)
+
+    try:
+        contest = Contest.objects.get(contest_id=contest_id)
+    except Contest.DoesNotExist:
+        return _json_error('比赛不存在', status=404)
+
+    try:
+        contest_problem = ContestProblem.objects.select_related('problem', 'problem__stat').get(
+            contest=contest, problem_id=problem_id
+        )
+    except ContestProblem.DoesNotExist:
+        return _json_error('该题目不在本比赛中', status=404)
+
+    problem = contest_problem.problem
+    problem_data = problem.stat
+
+    total_submissions = problem_data.submission
+    pass_rate = (problem_data.ac / total_submissions * 100) if total_submissions > 0 else 0
+
+    tags = []
+    if problem_data.tag:
+        tags = [t.strip() for t in problem_data.tag.split('|') if t.strip()]
+
+    samples = []
+    input_demo = problem.input_demo or ''
+    output_demo = problem.output_demo or ''
+    if input_demo or output_demo:
+        input_list = input_demo.split('|') if input_demo else []
+        input_list = [s.strip() for s in input_list if s.strip()]
+        output_list = output_demo.split('|') if output_demo else []
+        output_list = [s.strip() for s in output_list if s.strip()]
+        max_len = max(len(input_list), len(output_list))
+        for i in range(max_len):
+            samples.append({
+                'input': input_list[i] if i < len(input_list) else '',
+                'output': output_list[i] if i < len(output_list) else ''
+            })
+
+    level_map = {
+        ProblemData.LEVEL_EASY: 1,
+        ProblemData.LEVEL_MEDIUM: 2,
+        ProblemData.LEVEL_HARD: 3,
+    }
+
+    return _json_success(
+        '获取题目详情成功',
+        data={
+            'id': problem.problem_id,
+            'title': problem.title,
+            'display_order': contest_problem.display_order or '',
+            'display_title': contest_problem.display_title or problem.title,
+            'content': problem.content,
+            'input_description': problem.input_description,
+            'output_description': problem.output_description,
+            'input_demo': problem.input_demo,
+            'output_demo': problem.output_demo,
+            'samples': samples,
+            'hint': problem.hint,
+            'time_limit': problem.time_limit,
+            'memory_limit': problem.memory_limit,
+            'difficulty': level_map.get(problem_data.level, 1),
+            'submissions': total_submissions,
+            'accepted_count': problem_data.ac,
+            'pass_rate': round(pass_rate, 1),
+            'tags': tags,
+            'score': problem_data.score,
+            'auth': problem_data.auth,
+            'author': problem.author,
+            'create_time': timezone.localtime(problem.create_time).strftime('%Y-%m-%d %H:%M:%S') if problem.create_time else None,
         }
     )
 
