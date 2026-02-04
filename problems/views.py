@@ -1817,6 +1817,24 @@ def list_submissions(request):
         submission_id = request.GET.get('submission_id')
         status = request.GET.get('status')
         language = request.GET.get('language')
+
+        # 题目权限筛选（可选，支持多值，默认不限制，交由调用方决定）
+        # 调用方可以通过 ?auth=1 或 ?auth=1,3 或 ?auth=1&auth=3 这样的形式传参
+        raw_auth_values = request.GET.getlist('auth')
+        auth_values = []
+        for raw_value in raw_auth_values:
+            if raw_value is None:
+                continue
+            for token in str(raw_value).split(','):
+                token = token.strip()
+                if not token:
+                    continue
+                try:
+                    parsed = int(token)
+                except (TypeError, ValueError):
+                    continue
+                if parsed in (Problem.PUBLIC, Problem.PRIVATE, Problem.CONTEST):
+                    auth_values.append(parsed)
         
         try:
             page = int(raw_page)
@@ -1836,6 +1854,10 @@ def list_submissions(request):
         
         # 构建查询 - 所有人都可以查看所有提交记录
         queryset = Submission.objects.select_related('problem', 'user').all()
+
+        # 如果调用方指定了题目权限范围，则只返回对应权限下题目的提交
+        if auth_values:
+            queryset = queryset.filter(problem__auth__in=auth_values)
         
         # 题目ID筛选
         if problem_id:

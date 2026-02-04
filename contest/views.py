@@ -54,6 +54,164 @@ def _get_dynamic_status(time_config: ContestTimeConfig) -> str:
 
 
 @csrf_exempt
+@jwt_required
+@require_http_methods(['GET'])
+def list_contest_submissions(request, contest_id):
+    """
+    获取某场比赛中题目的提交记录（支持分页、筛选）
+
+    GET /api/contests/<contest_id>/submissions
+
+    查询参数：
+    - page: 页码（默认1）
+    - page_size: 每页数量（默认20）
+    - problem_id: 题库题目ID筛选（可选，Problem.problem_id）
+    - user_id: 用户ID筛选（可选）
+    - status: 状态筛选（可选，0=Accepted, -1=Wrong Answer, 1=Time Limit Exceeded, etc.）
+    - language: 语言筛选（可选，cpp, java, python, javascript）
+    """
+    from problems.models import Submission
+
+    try:
+        contest_id = int(contest_id)
+    except (TypeError, ValueError):
+        return _json_error('比赛ID格式错误', status=400)
+
+    try:
+        contest = Contest.objects.get(contest_id=contest_id)
+    except Contest.DoesNotExist:
+        return _json_error('比赛不存在', status=404)
+
+    # 获取本场比赛关联的题目集合
+    contest_problems = ContestProblem.objects.filter(contest=contest).select_related('problem')
+    problem_ids = [cp.problem_id for cp in contest_problems]
+
+    # 如果比赛中没有题目，直接返回空结果
+    if not problem_ids:
+        return _json_success('获取成功', data={
+            'submissions': [],
+            'pagination': {
+                'page': 1,
+                'page_size': int(request.GET.get('page_size', '20') or 20),
+                'total': 0,
+                'total_pages': 0,
+                'has_next': False,
+                'has_previous': False,
+            }
+        })
+
+    # 解析分页与筛选参数
+    raw_page = request.GET.get('page', '1')
+    raw_page_size = request.GET.get('page_size', '20')
+    problem_id = request.GET.get('problem_id')
+    user_id = request.GET.get('user_id')
+    submission_id = request.GET.get('submission_id')
+    status = request.GET.get('status')
+    language = request.GET.get('language')
+
+    try:
+        page = int(raw_page)
+    except (TypeError, ValueError):
+        page = 1
+
+    try:
+        page_size = int(raw_page_size)
+    except (TypeError, ValueError):
+        page_size = 20
+
+    # 限制每页数量
+    if page_size > 100:
+        page_size = 100
+    if page_size < 1:
+        page_size = 20
+
+    # 构建查询：限定为本比赛中的题目
+    queryset = Submission.objects.select_related('problem', 'user').filter(
+        problem_id__in=problem_ids
+    )
+
+    # 题目ID进一步筛选（题库 problem_id）
+    if problem_id:
+        try:
+            problem_id = int(problem_id)
+            queryset = queryset.filter(problem__problem_id=problem_id)
+        except (TypeError, ValueError):
+            pass
+
+    # 测评ID筛选
+    if submission_id:
+        try:
+            submission_id = int(submission_id)
+            queryset = queryset.filter(submission_id=submission_id)
+        except (TypeError, ValueError):
+            pass
+
+    # 用户ID筛选
+    if user_id:
+        try:
+            user_id = int(user_id)
+            queryset = queryset.filter(user_id=user_id)
+        except (TypeError, ValueError):
+            pass
+
+    # 状态筛选
+    if status is not None:
+        try:
+            status = int(status)
+            queryset = queryset.filter(status=status)
+        except (TypeError, ValueError):
+            pass
+
+    # 语言筛选
+    if language:
+        queryset = queryset.filter(language=language)
+
+    # 按提交时间倒序排列
+    queryset = queryset.order_by('-submit_time')
+
+    # 分页
+    paginator = Paginator(queryset, page_size)
+    total = paginator.count
+    total_pages = paginator.num_pages if total > 0 else 0
+
+    try:
+        submissions_page = paginator.page(page)
+    except Exception:
+        submissions_page = paginator.page(1)
+        page = 1
+
+    # 序列化提交记录
+    submissions_data = []
+    for s in submissions_page:
+        submissions_data.append({
+            'submission_id': s.submission_id,
+            'problem_id': s.problem.problem_id,
+            'problem_title': s.problem.title,
+            'user_id': s.user.id,
+            'username': s.user.username,
+            'language': s.language,
+            'status': s.status,
+            'status_text': s.get_status_display(),
+            'cpu_time': s.cpu_time,
+            'memory': s.memory,
+            'code_length': s.code_length,
+            'submit_time': s.submit_time.isoformat(),
+        })
+
+    return _json_success('获取成功', data={
+        'submissions': submissions_data,
+        'pagination': {
+            'page': page,
+            'page_size': page_size,
+            'total': total,
+            'total_pages': total_pages,
+            'has_next': submissions_page.has_next() if total > 0 else False,
+            'has_previous': submissions_page.has_previous() if total > 0 else False,
+        }
+    })
+
+
+@csrf_exempt
 @require_http_methods(['GET'])
 def list_contests(request):
     """
