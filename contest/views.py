@@ -15,7 +15,8 @@ from .models import (
     ContestPermissionConfig,
     ContestStatistics,
     ContestAnnouncement,
-    ContestProblem
+    ContestProblem,
+    ContestRegistration
 )
 from users.views import _json_error, _json_success, _parse_request_body, jwt_required
 
@@ -1327,6 +1328,139 @@ def get_problem_bank(request):
             }
         }
     )
+
+
+@csrf_exempt
+@jwt_required
+@require_http_methods(['GET'])
+def get_contest_registration(request, contest_id):
+    """
+    查询当前登录用户在指定比赛的报名信息
+
+    GET /api/contests/<contest_id>/registration
+    """
+    try:
+        contest_id = int(contest_id)
+    except (TypeError, ValueError):
+        return _json_error('比赛ID格式错误', status=400)
+
+    user = request.user
+    if not user:
+        return _json_error('用户未登录', status=401)
+
+    try:
+        contest = Contest.objects.get(contest_id=contest_id)
+    except Contest.DoesNotExist:
+        return _json_error('比赛不存在', status=404)
+
+    registration = ContestRegistration.objects.filter(contest=contest, user=user).first()
+    if not registration:
+        return _json_success('未报名', data={'registered': False})
+
+    return _json_success('已报名', data={
+        'registered': True,
+        'registration': {
+            'id': registration.id,
+            'contest_id': contest.contest_id,
+            'user_id': user.id,
+            'real_name': registration.real_name,
+            'student_id': registration.student_id,
+            'school': registration.school,
+            'phone': registration.phone,
+            'email': registration.email,
+            'status': registration.status,
+            'is_star': registration.is_star,
+            'register_time': registration.register_time.isoformat() if registration.register_time else None,
+        }
+    })
+
+
+@csrf_exempt
+@jwt_required
+@require_http_methods(['POST'])
+def register_for_contest(request, contest_id):
+    """
+    报名比赛（同一用户同一比赛只能报名一次）
+
+    POST /api/contests/<contest_id>/registration
+
+    请求体（JSON，可选字段）：
+    {
+        "real_name": "...",
+        "student_id": "...",
+        "school": "...",
+        "phone": "...",
+        "email": "...",
+        "is_star": false
+    }
+    """
+    try:
+        contest_id = int(contest_id)
+    except (TypeError, ValueError):
+        return _json_error('比赛ID格式错误', status=400)
+
+    user = request.user
+    if not user:
+        return _json_error('用户未登录', status=401)
+
+    try:
+        contest = Contest.objects.get(contest_id=contest_id)
+    except Contest.DoesNotExist:
+        return _json_error('比赛不存在', status=404)
+
+    # 已报名则直接返回成功，避免重复报错
+    existing = ContestRegistration.objects.filter(contest=contest, user=user).first()
+    if existing:
+        return _json_success('已报名', data={
+            'registered': True,
+            'registration': {
+                'id': existing.id,
+                'contest_id': contest.contest_id,
+                'user_id': user.id,
+                'real_name': existing.real_name,
+                'student_id': existing.student_id,
+                'school': existing.school,
+                'phone': existing.phone,
+                'email': existing.email,
+                'status': existing.status,
+                'is_star': existing.is_star,
+                'register_time': existing.register_time.isoformat() if existing.register_time else None,
+            }
+        })
+
+    try:
+        data = _parse_request_body(request)
+    except ValueError as exc:
+        return _json_error(str(exc), status=400, code='bad_json')
+
+    registration = ContestRegistration.objects.create(
+        contest=contest,
+        user=user,
+        real_name=data.get('real_name') or None,
+        student_id=data.get('student_id') or None,
+        school=data.get('school') or None,
+        phone=data.get('phone') or None,
+        email=data.get('email') or None,
+        is_star=bool(data.get('is_star', False)),
+        status=ContestRegistration.STATUS_SUCCESS
+    )
+
+    return _json_success('报名成功', data={
+        'registered': True,
+        'registration': {
+            'id': registration.id,
+            'contest_id': contest.contest_id,
+            'user_id': user.id,
+            'real_name': registration.real_name,
+            'student_id': registration.student_id,
+            'school': registration.school,
+            'phone': registration.phone,
+            'email': registration.email,
+            'status': registration.status,
+            'is_star': registration.is_star,
+            'register_time': registration.register_time.isoformat() if registration.register_time else None,
+        }
+    })
 
 
 @csrf_exempt

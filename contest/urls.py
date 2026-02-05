@@ -33,6 +33,10 @@ urlpatterns = [
     path('<int:contest_id>/problems/<int:problem_relation_id>/color', views.update_contest_problem_color, name='contest-update-problem-color'),
     path('problem-bank', views.get_problem_bank, name='contest-problem-bank'),
 
+    # 比赛报名
+    path('<int:contest_id>/registration', views.get_contest_registration, name='contest-registration-get'),
+    path('<int:contest_id>/registration/apply', views.register_for_contest, name='contest-registration-post'),
+
     # 比赛提交记录
     path('<int:contest_id>/submissions', views.list_contest_submissions, name='contest-submissions'),
     
