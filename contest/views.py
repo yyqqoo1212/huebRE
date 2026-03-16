@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from django.db import transaction
+from django.db.models import F
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from django.http import JsonResponse
@@ -305,7 +306,6 @@ def list_contests(request):
             'duration': time_config.duration if time_config else 0,
             'format': rule_config.contest_type if rule_config else 'ACM',
             'type': rule_config.contest_mode if rule_config else '公开赛',
-            'participants': statistics.participant_count if statistics else 0,
             'status': current_status,
         })
     
@@ -383,7 +383,6 @@ def get_contest_detail(request, contest_id):
                 'show_testcase': permission_config.show_testcase if permission_config else False,
             } if permission_config else None,
             'statistics': {
-                'participant_count': statistics.participant_count if statistics else 0,
                 'registration_count': statistics.registration_count if statistics else 0,
                 'submission_count': statistics.submission_count if statistics else 0,
                 'problem_count': statistics.problem_count if statistics else 0,
@@ -1433,17 +1432,27 @@ def register_for_contest(request, contest_id):
     except ValueError as exc:
         return _json_error(str(exc), status=400, code='bad_json')
 
-    registration = ContestRegistration.objects.create(
-        contest=contest,
-        user=user,
-        real_name=data.get('real_name') or None,
-        student_id=data.get('student_id') or None,
-        school=data.get('school') or None,
-        phone=data.get('phone') or None,
-        email=data.get('email') or None,
-        is_star=bool(data.get('is_star', False)),
-        status=ContestRegistration.STATUS_SUCCESS
-    )
+    try:
+        with transaction.atomic():
+            registration = ContestRegistration.objects.create(
+                contest=contest,
+                user=user,
+                real_name=data.get('real_name') or None,
+                student_id=data.get('student_id') or None,
+                school=data.get('school') or None,
+                phone=data.get('phone') or None,
+                email=data.get('email') or None,
+                is_star=bool(data.get('is_star', False)),
+                status=ContestRegistration.STATUS_SUCCESS
+            )
+
+            # 更新比赛统计：报名人数 +1（仅在首次创建报名记录时）
+            statistics, _ = ContestStatistics.objects.get_or_create(contest=contest)
+            ContestStatistics.objects.filter(id=statistics.id).update(
+                registration_count=F('registration_count') + 1
+            )
+    except Exception as exc:
+        return _json_error(f'报名失败: {str(exc)}', status=500, code='db_error')
 
     return _json_success('报名成功', data={
         'registered': True,

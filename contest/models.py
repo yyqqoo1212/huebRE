@@ -183,7 +183,6 @@ class ContestStatistics(models.Model):
         verbose_name='比赛',
         db_column='contest_id'
     )
-    participant_count = models.PositiveIntegerField(default=0, verbose_name='参赛人数')
     registration_count = models.PositiveIntegerField(default=0, verbose_name='报名人数')
     submission_count = models.PositiveIntegerField(default=0, verbose_name='总提交次数')
     problem_count = models.PositiveIntegerField(default=0, verbose_name='题目数量')
@@ -196,7 +195,7 @@ class ContestStatistics(models.Model):
         verbose_name_plural = '比赛统计信息'
 
     def __str__(self):
-        return f'{self.contest.contest_id} - participants:{self.participant_count}'
+        return f'{self.contest.contest_id} - registrations:{self.registration_count}'
 
 
 class ContestProblem(models.Model):

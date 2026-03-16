@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from django.db import IntegrityError, transaction
+from django.db.models import F
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from django.utils.timezone import localtime
@@ -1525,6 +1526,20 @@ def submit_code(request, problem_id):
     # 获取当前用户
     user = request.user
     
+    # ===== 比赛统计（提交时）=====
+    # submission_count：每次提交 +1
+    contest_ids = []
+    try:
+        from contest.models import ContestProblem
+
+        contest_ids = list(
+            ContestProblem.objects.filter(problem_id=problem.problem_id)
+            .values_list('contest_id', flat=True)
+            .distinct()
+        )
+    except Exception:
+        contest_ids = []
+
     # 创建提交记录（初始状态为Judging）
     code_length = len(code.encode('utf-8'))
     submission = Submission.objects.create(
@@ -1536,6 +1551,19 @@ def submit_code(request, problem_id):
         code_length=code_length,
         result={}
     )
+
+    # 统计自增（小事务，不影响主流程）
+    try:
+        if contest_ids:
+            from contest.models import ContestStatistics
+            with transaction.atomic():
+                for cid in contest_ids:
+                    statistics, _ = ContestStatistics.objects.get_or_create(contest_id=cid)
+                    ContestStatistics.objects.filter(id=statistics.id).update(
+                        submission_count=F('submission_count') + 1
+                    )
+    except Exception:
+        pass
     
     try:
         # 调用通用判题函数，使用题目的时间限制和内存限制
@@ -1648,6 +1676,26 @@ def submit_code(request, problem_id):
             problem_data.ce += 1
         
         problem_data.save()
+
+        # ===== 比赛统计（AC提交数）=====
+        if final_status == Submission.STATUS_ACCEPTED:
+            try:
+                from contest.models import ContestProblem, ContestStatistics
+
+                contest_ids = list(
+                    ContestProblem.objects.filter(problem_id=problem.problem_id)
+                    .values_list('contest_id', flat=True)
+                    .distinct()
+                )
+                if contest_ids:
+                    with transaction.atomic():
+                        for cid in contest_ids:
+                            statistics, _ = ContestStatistics.objects.get_or_create(contest_id=cid)
+                            ContestStatistics.objects.filter(id=statistics.id).update(
+                                ac_submission_count=F('ac_submission_count') + 1
+                            )
+            except Exception:
+                pass
         
         # 更新用户统计
         user.total_submissions += 1

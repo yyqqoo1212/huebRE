@@ -45,7 +45,7 @@ class ContestPermissionConfigAdmin(admin.ModelAdmin):
 
 @admin.register(ContestStatistics)
 class ContestStatisticsAdmin(admin.ModelAdmin):
-    list_display = ('id', 'contest', 'participant_count', 'registration_count', 'submission_count', 'problem_count', 'ac_submission_count')
+    list_display = ('id', 'contest', 'registration_count', 'submission_count', 'problem_count', 'ac_submission_count')
     search_fields = ('contest__contest_id', 'contest__contest_name')
     readonly_fields = ('id', 'update_time')
 
