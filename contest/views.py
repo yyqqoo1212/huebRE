@@ -216,6 +216,113 @@ def list_contest_submissions(request, contest_id):
 
 
 @csrf_exempt
+@jwt_required
+@require_http_methods(['GET'])
+def get_contest_rankings(request, contest_id):
+    """
+    获取比赛排行榜
+
+    ACM：
+    - 主排序：ac_count 降序
+    - 次排序：total_time 升序
+
+    IOI：
+    - 只按 total_score 降序排序
+
+    GET /api/contests/<contest_id>/rankings
+    """
+    try:
+        contest_id = int(contest_id)
+    except (TypeError, ValueError):
+        return _json_error('比赛ID格式错误', status=400)
+
+    try:
+        contest = Contest.objects.select_related('rule_config').get(contest_id=contest_id)
+    except Contest.DoesNotExist:
+        return _json_error('比赛不存在', status=404)
+
+    contest_type = getattr(getattr(contest, 'rule_config', None), 'contest_type', None)
+    if contest_type not in [ContestRuleConfig.CONTEST_TYPE_ACM, ContestRuleConfig.CONTEST_TYPE_IOI]:
+        return _json_success('获取排行榜成功', data={'contestType': contest_type, 'rankings': []})
+
+    # 题目序号用于保证 problem_status 的展示顺序
+    contest_problem_orders = list(
+        ContestProblem.objects.filter(contest=contest)
+        .order_by('display_order')
+        .values_list('display_order', flat=True)
+    )
+
+    base_qs = ContestRank.objects.select_related('user').filter(contest_id=contest_id)
+    rankings = []
+    current_user_id = getattr(request.user, 'id', None)
+
+    if contest_type == ContestRuleConfig.CONTEST_TYPE_IOI:
+        # 数据库排序：只按 total_score（降序）；total_score 相同按 user_id 保证稳定
+        rank_qs = base_qs.order_by('-total_score', 'user_id')
+
+        prev_key = None
+        current_rank = 0
+        for idx, r in enumerate(rank_qs, start=1):
+            ps = r.problem_status or {}
+            problems = {}
+            for order in contest_problem_orders:
+                if order is None:
+                    continue
+                v = ps.get(order)
+                accepted = v and v.get('status') == 'Accepted'
+                problems[order] = 'accepted' if accepted else 'none'
+
+            score_key = round(float(r.total_score or 0), 6)
+            if prev_key is None or score_key != prev_key:
+                current_rank = idx
+                prev_key = score_key
+
+            rankings.append({
+                'rank': current_rank,
+                'userId': r.user.id,
+                'username': r.user.username,
+                'totalScore': float(r.total_score or 0),
+                'totalTime': 0,
+                'solved': int(r.ac_count or 0),
+                'problems': problems,
+                'isCurrentUser': (current_user_id is not None and r.user_id == current_user_id),
+            })
+    else:
+        # ACM：主排序 ac_count 降序，次排序 total_time 升序；并列按 user_id 稳定
+        rank_qs = base_qs.order_by('-ac_count', 'total_time', 'user_id')
+
+        prev_key = None
+        current_rank = 0
+        for idx, r in enumerate(rank_qs, start=1):
+            ps = r.problem_status or {}
+            problems = {}
+            for order in contest_problem_orders:
+                if order is None:
+                    continue
+                v = ps.get(order)
+                accepted = v and v.get('status') == 'Accepted'
+                problems[order] = 'accepted' if accepted else 'none'
+
+            key = (int(r.ac_count or 0), int(r.total_time or 0))
+            if prev_key is None or key != prev_key:
+                current_rank = idx
+                prev_key = key
+
+            rankings.append({
+                'rank': current_rank,
+                'userId': r.user.id,
+                'username': r.user.username,
+                'totalScore': 0,
+                'totalTime': int(r.total_time or 0),
+                'solved': int(r.ac_count or 0),
+                'problems': problems,
+                'isCurrentUser': (current_user_id is not None and r.user_id == current_user_id),
+            })
+
+    return _json_success('获取排行榜成功', data={'contestType': contest_type, 'rankings': rankings})
+
+
+@csrf_exempt
 @require_http_methods(['GET'])
 def list_contests(request):
     """
@@ -1474,7 +1581,8 @@ def register_for_contest(request, contest_id):
                     }
                 else:
                     initial_problem_status[key] = {
-                        'status': '未提交',
+                        # IOI 与 ACM 共用统一结构：status 只包含 Accepted / Unaccepted
+                        'status': 'Unaccepted' if contest_type == ContestRuleConfig.CONTEST_TYPE_IOI else '未提交',
                         'time': 0,
                         'score': 0,
                         'tries': 0
@@ -1484,7 +1592,6 @@ def register_for_contest(request, contest_id):
                 contest=contest,
                 user=user,
                 defaults={
-                    'rank': 0,
                     'total_score': 0.0,
                     'total_time': 0,
                     'ac_count': 0,

@@ -1541,6 +1541,7 @@ def submit_code(request, problem_id):
     contest_is_acm = False
     contest_is_ioi = False
     contest_start_time = None
+    contest_penalty_minutes = 0
     if contest_id is not None:
         try:
             contest_id = int(contest_id)
@@ -1576,6 +1577,9 @@ def submit_code(request, problem_id):
                 contest_is_acm = True
                 tc = getattr(contest_obj, 'time_config', None)
                 contest_start_time = getattr(tc, 'start_time', None) if tc else None
+                # ACM罚时（分钟）
+                rc = getattr(contest_obj, 'rule_config', None)
+                contest_penalty_minutes = int(getattr(rc, 'penalty_time', 0) or 0)
             elif contest_type == ContestRuleConfig.CONTEST_TYPE_IOI:
                 contest_is_ioi = True
         except Exception:
@@ -1621,7 +1625,6 @@ def submit_code(request, problem_id):
                         contest_id=contest_id,
                         user_id=user.id,
                         defaults={
-                            'rank': 0,
                             'total_score': 0.0,
                             'total_time': 0,
                             'ac_count': 0,
@@ -1644,6 +1647,11 @@ def submit_code(request, problem_id):
                     elif contest_is_ioi:
                         # IOI：这里只确保结构存在，其余在判题完成后按得分更新
                         entry = ps.get(key) or {'status': 'Unaccepted', 'time': 0, 'score': 0, 'tries': 0}
+                        # 统一：IOI 的 status 只允许 Accepted / Unaccepted，tries/time 固定为 0
+                        entry['tries'] = 0
+                        entry['time'] = 0
+                        entry['status'] = 'Accepted' if entry.get('status') == 'Accepted' else 'Unaccepted'
+                        entry['score'] = float(entry.get('score') or 0)
                     ps[key] = entry
                     rank_obj.problem_status = ps
                     rank_obj.save(update_fields=['submit_count', 'problem_status', 'update_time'])
@@ -1765,7 +1773,6 @@ def submit_code(request, problem_id):
                             contest_id=contest_id,
                             user_id=user.id,
                             defaults={
-                                'rank': 0,
                                 'total_score': 0.0,
                                 'total_time': 0,
                                 'ac_count': 0,
@@ -1802,46 +1809,64 @@ def submit_code(request, problem_id):
                                         # 记录 time 失败不影响主流程
                                         pass
                                     rank_obj.ac_count = int(rank_obj.ac_count or 0) + 1
+                                    # 首次 AC：累加本题罚时到 total_time
+                                    try:
+                                        ac_time_minutes = int(entry.get('time') or 0)
+                                        tries_cnt = int(entry.get('tries') or 0)
+                                        wrong_cnt = max(0, tries_cnt - 1)  # tries 含 AC 本次
+                                        per_problem_time = ac_time_minutes + contest_penalty_minutes * wrong_cnt
+                                        rank_obj.total_time = int(rank_obj.total_time or 0) + int(per_problem_time)
+                                    except Exception:
+                                        pass
                                 else:
                                     entry['status'] = 'Unaccepted'
                                     entry['score'] = 0
                         elif contest_is_ioi:
                             # 根据通过测试数量计算得分：按题目满分和平分到每个测试用例
                             try:
-                                from problems.models import ProblemData
-                                from contest.models import ContestProblem
-
-                                cp = contest_problem  # 当前比赛题目
+                                cp = contest_problem  # 当前比赛题目关联
                                 full_score = cp.score or 0
                                 problem_data, _ = ProblemData.objects.get_or_create(problem=problem)
                                 testcase_count = problem_data.testcase_count or 0
                                 test_results = judge_result.get('data', []) or []
 
-                                passed_tests = sum(
-                                    1 for r in test_results if r.get('result', -1) == Submission.STATUS_ACCEPTED
-                                )
+                                passed_tests = sum(1 for r in test_results if r.get('result', -1) == Submission.STATUS_ACCEPTED)
+                                passed_groups = min(passed_tests, testcase_count) if testcase_count > 0 else passed_tests
+
                                 if testcase_count <= 0:
                                     # 没有配置测试数据组数时，只有全 AC 才给满分
-                                    new_score = full_score if final_status == Submission.STATUS_ACCEPTED else 0
+                                    accepted_now = (final_status == Submission.STATUS_ACCEPTED and full_score > 0)
+                                    new_score = float(full_score) if accepted_now else 0.0
                                 else:
-                                    per_case = full_score / testcase_count
-                                    new_score = per_case * passed_tests
+                                    per_case = float(full_score) / testcase_count if testcase_count > 0 else 0.0
+                                    new_score = per_case * passed_groups
+                                    accepted_now = (passed_groups == testcase_count and full_score > 0)
 
-                                # 保留最高得分
+                                # 保留最高得分（取 best）
                                 old_score = float(entry.get('score') or 0)
                                 best_score = max(old_score, float(new_score))
-                                entry['score'] = best_score
+                                entry['score'] = float(best_score)
                                 entry['time'] = 0  # IOI 不关心时间
                                 entry['tries'] = 0  # 按要求固定为 0
-                                # 满分视为 Accepted，否则 Unaccepted
-                                entry['status'] = 'Accepted' if best_score >= float(full_score) and full_score > 0 else 'Unaccepted'
+
+                                # status 只保存 Accepted / Unaccepted（满分才算 Accepted）
+                                full = float(full_score)
+                                entry['status'] = 'Accepted' if (full > 0 and best_score >= full - 1e-9) else 'Unaccepted'
                             except Exception:
                                 # 得分计算失败时保持原值
                                 pass
 
                         ps[key] = entry
                         rank_obj.problem_status = ps
-                        rank_obj.save(update_fields=['ac_count', 'problem_status', 'update_time'])
+                        # IOI：更新 total_score（可用于 SQL 排序）以及 ac_count（用于并列时可选的二级排序）
+                        if contest_is_ioi:
+                            rank_obj.total_score = sum(float(v.get('score') or 0) for v in ps.values())
+                            rank_obj.ac_count = sum(1 for v in ps.values() if v.get('status') == 'Accepted')
+                        # ACM：也需要保存 total_time 更新
+                        if contest_is_acm:
+                            rank_obj.save(update_fields=['ac_count', 'total_time', 'problem_status', 'update_time'])
+                        else:
+                            rank_obj.save(update_fields=['ac_count', 'total_score', 'problem_status', 'update_time'])
 
                         # contest_statistics.ac_submission_count：每次比赛 AC 提交 +1
                         if final_status == Submission.STATUS_ACCEPTED:

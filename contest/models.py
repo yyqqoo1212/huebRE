@@ -319,7 +319,6 @@ class ContestRank(models.Model):
         verbose_name='用户',
         db_column='user_id'
     )
-    rank = models.PositiveIntegerField(default=0, verbose_name='排名')
     total_score = models.FloatField(default=0.0, verbose_name='总分(IOI/OI赛制)')
     total_time = models.PositiveIntegerField(default=0, verbose_name='总罚时(分钟,ACM赛制)')
     ac_count = models.PositiveIntegerField(default=0, verbose_name='AC题目数')
@@ -336,13 +335,12 @@ class ContestRank(models.Model):
         verbose_name_plural = '比赛排名'
         unique_together = [['contest', 'user']]  # 同一用户在同一比赛中只有一条排名记录
         indexes = [
-            models.Index(fields=['contest', 'rank'], name='contest_rank_contest_rank_idx'),
             models.Index(fields=['contest', 'user'], name='contest_rank_contest_user_idx'),
             models.Index(fields=['update_time'], name='contest_rank_update_time_idx'),
         ]
 
     def __str__(self):
-        return f'{self.contest.contest_id} - {self.user.username} - Rank:{self.rank}'
+        return f'{self.contest.contest_id} - {self.user.username}'
 
 
 class ContestAnnouncement(models.Model):

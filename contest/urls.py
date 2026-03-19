@@ -39,6 +39,9 @@ urlpatterns = [
 
     # 比赛提交记录
     path('<int:contest_id>/submissions', views.list_contest_submissions, name='contest-submissions'),
+
+    # 比赛排行榜（当前仅 IOI）
+    path('<int:contest_id>/rankings', views.get_contest_rankings, name='contest-rankings'),
     
     # 获取比赛详情（放在最后，作为兜底）
     path('<int:contest_id>', views.get_contest_detail, name='contest-detail'),
