@@ -5,6 +5,7 @@ from django.db.models import F
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from django.utils.timezone import localtime
+from django.utils import timezone as dj_timezone
 
 from django.http import HttpResponse, JsonResponse
 from django.core.files.uploadedfile import UploadedFile
@@ -25,6 +26,18 @@ from uuid import uuid4
 import hashlib
 import requests
 import json
+
+
+def _format_dt_for_response(dt):
+    """
+    返回给前端的时间字符串。
+    当 USE_TZ=False 时，数据库写入的是 naive datetime，这里不再调用 localtime()。
+    """
+    if not dt:
+        return None
+    if dj_timezone.is_aware(dt):
+        dt = dj_timezone.localtime(dt)
+    return dt.strftime('%Y-%m-%d %H:%M:%S')
 
 
 @csrf_exempt
@@ -147,7 +160,7 @@ def list_problems(request):
             'id': problem.problem_id,
             'title': problem_data.title,
             'author': problem.author,
-            'create_time': localtime(problem.create_time).strftime('%Y-%m-%d %H:%M:%S') if problem.create_time else None,
+            'create_time': _format_dt_for_response(problem.create_time),
             'auth': problem_data.auth,
             'tags': tags,
             'difficulty': level_map.get(problem_data.level, 'easy'),
@@ -193,7 +206,12 @@ def get_problem_detail(request, problem_id):
         if allow_all:
             problem = Problem.objects.select_related('stat').get(problem_id=problem_id)
         else:
-            problem = Problem.objects.select_related('stat').get(problem_id=problem_id, auth=Problem.PUBLIC)
+            # 普通用户：只允许查看公开题（权限以 ProblemData.auth 为准）
+            # ProblemData 通过相关名 stat 与 Problem 关联
+            problem = Problem.objects.select_related('stat').get(
+                problem_id=problem_id,
+                stat__auth=Problem.PUBLIC,
+            )
         problem_data = problem.stat
     except Problem.DoesNotExist:
         return _json_error('题目不存在或无权限访问', status=404)
@@ -262,7 +280,7 @@ def get_problem_detail(request, problem_id):
             'score': problem_data.score,
             'auth': problem_data.auth,  # 添加权限字段
             'author': problem.author,
-            'create_time': localtime(problem.create_time).strftime('%Y-%m-%d %H:%M:%S') if problem.create_time else None,
+            'create_time': _format_dt_for_response(problem.create_time),
         }
     )
 
@@ -371,10 +389,9 @@ def create_problem(request):
                 time_limit=time_limit,
                 memory_limit=memory_limit,
                 hint=hint,
-                auth=auth,
             )
 
-            ProblemData.objects.create(
+            problem_data = ProblemData.objects.create(
                 problem=problem,
                 title=title,
                 level=level,
@@ -394,7 +411,7 @@ def create_problem(request):
             'problem_id': problem.problem_id,
             'title': problem.title,
             'author': problem.author,
-            'auth': problem.auth,
+            'auth': problem_data.auth,
             'time_limit': problem.time_limit,
             'memory_limit': problem.memory_limit,
             'level': level,
@@ -581,7 +598,6 @@ def update_problem(request, problem_id):
             problem.time_limit = time_limit
             problem.memory_limit = memory_limit
             problem.hint = hint
-            problem.auth = auth
             problem.save()
 
             # 更新 ProblemData 表
@@ -600,7 +616,7 @@ def update_problem(request, problem_id):
             'problem_id': problem.problem_id,
             'title': problem.title,
             'author': problem.author,
-            'auth': problem.auth,
+            'auth': problem_data.auth,
             'time_limit': problem.time_limit,
             'memory_limit': problem.memory_limit,
             'level': level,
@@ -2106,7 +2122,8 @@ def list_submissions(request):
 
         # 如果调用方指定了题目权限范围，则只返回对应权限下题目的提交
         if auth_values:
-            queryset = queryset.filter(problem__auth__in=auth_values)
+            # 提交的题目权限以 ProblemData.auth 为准
+            queryset = queryset.filter(problem__stat__auth__in=auth_values)
         
         # 题目ID筛选
         if problem_id:

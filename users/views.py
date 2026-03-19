@@ -18,6 +18,7 @@ from django.db.models import Q
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
+from django.utils import timezone as dj_timezone
 
 from .account_deletion import delete_account_by_id
 from .models import User
@@ -300,7 +301,9 @@ def register(request):
                 real_name=real_name,
                 status='normal',  # 新用户默认为正常状态
                 avatar_url='',  # 临时设置为空，后续会更新
-                last_login_time=datetime.now(timezone.utc),
+                # USE_TZ=False 时 MySQL 后端不支持 timezone-aware datetime，
+                # 这里统一写入“北京时间 naive datetime”（不含 tzinfo）
+                last_login_time=dj_timezone.now(),
             )
 
             # user.last_login_time = datetime.now(timezone.utc)
@@ -434,7 +437,7 @@ def login(request):
         return _json_error('账户已被封禁，请联系管理员', status=403, code='account_banned')
 
     # 更新最后登录时间
-    user.last_login_time = datetime.now(timezone.utc)
+    user.last_login_time = dj_timezone.now()
     user.save(update_fields=['last_login_time'])
 
     token = _generate_jwt(user)

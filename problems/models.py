@@ -4,10 +4,12 @@ from django.utils import timezone
 
 def _problem_create_time_default():
     """写入数据库时使用东八区（Asia/Shanghai）本地时间，便于直接查库看到正确时间。"""
-    return timezone.make_naive(
-        timezone.localtime(timezone.now()),
-        timezone.get_current_timezone()
-    )
+    # USE_TZ=False 时，timezone.now() 返回 naive datetime，不能再调用 localtime/make_naive。
+    now = timezone.now()
+    if timezone.is_aware(now):
+        now = timezone.localtime(now)
+        now = timezone.make_naive(now, timezone.get_current_timezone())
+    return now
 
 
 class Problem(models.Model):

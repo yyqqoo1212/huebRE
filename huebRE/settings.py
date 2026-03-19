@@ -233,7 +233,9 @@ TIME_ZONE = 'Asia/Shanghai'
 
 USE_I18N = True
 
-USE_TZ = True
+# 新数据直接按“北京时间”写入数据库（不再统一转换为 UTC）
+# 旧数据不需要迁移（按你需求保持现状）。
+USE_TZ = False
 
 
 # Static files (CSS, JavaScript, Images)

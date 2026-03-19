@@ -23,6 +23,52 @@ from .models import (
 from users.views import _json_error, _json_success, _parse_request_body, jwt_required
 
 
+def _to_naive_local(dt):
+    """
+    USE_TZ=False 时，数据库不接受 timezone-aware datetime。
+    把 aware datetime 转成“本地时区的 naive datetime（不带 tzinfo）”，避免保存时报错。
+    """
+    if dt is None:
+        return None
+    if timezone.is_aware(dt):
+        return timezone.make_naive(dt, timezone.get_current_timezone())
+    return dt
+
+
+def _restore_contest_problem_auths(contest: Contest, now):
+    """
+    比赛结束后，把该比赛中被标记为“比赛题目(CONTEST)”的 ProblemData 恢复为“公开题目(PUBLIC)”。
+
+    防止并发比赛覆盖：如果同一道题仍出现在其它“未结束”比赛中，则不恢复。
+    """
+    from problems.models import Problem, ProblemData
+
+    contest_problem_ids = list(
+        ContestProblem.objects.filter(contest=contest).values_list('problem_id', flat=True)
+    )
+    if not contest_problem_ids:
+        return
+
+    # 仍处于进行中的/即将开始但未结束的其它比赛中包含这些题目吗？
+    other_contest_running_problem_ids = list(
+        ContestProblem.objects.filter(problem_id__in=contest_problem_ids)
+        .exclude(contest=contest)
+        .filter(contest__time_config__end_time__gte=now)
+        .values_list('problem_id', flat=True)
+        .distinct()
+    )
+
+    # 只恢复 auth=CONTEST 的题（即由 add_problem_to_contest 从 PUBLIC 切换过去的那部分）
+    qs = ProblemData.objects.filter(
+        problem_id__in=contest_problem_ids,
+        auth=Problem.CONTEST,
+    )
+    if other_contest_running_problem_ids:
+        qs = qs.exclude(problem_id__in=other_contest_running_problem_ids)
+
+    qs.update(auth=Problem.PUBLIC)
+
+
 def _get_dynamic_status(time_config: ContestTimeConfig) -> str:
     """
     根据当前时间动态计算比赛状态，并在需要时更新数据库中的状态字段。
@@ -33,14 +79,9 @@ def _get_dynamic_status(time_config: ContestTimeConfig) -> str:
     start_time = time_config.start_time
     end_time = time_config.end_time
 
-    # 确保时间为带时区的 aware datetime，避免比较错误
-    current_tz = timezone.get_current_timezone()
-    if timezone.is_naive(start_time):
-        start_time = timezone.make_aware(start_time, current_tz)
-    if timezone.is_naive(end_time):
-        end_time = timezone.make_aware(end_time, current_tz)
-
-    now = timezone.now()
+    start_time = _to_naive_local(start_time)
+    end_time = _to_naive_local(end_time)
+    now = _to_naive_local(timezone.now())
     if now < start_time:
         status = ContestTimeConfig.STATUS_UPCOMING
     elif now <= end_time:
@@ -49,7 +90,16 @@ def _get_dynamic_status(time_config: ContestTimeConfig) -> str:
         status = ContestTimeConfig.STATUS_ENDED
 
     # 如有变化，回写数据库（轻量级更新）
+    previous_status = time_config.status
     if time_config.status != status:
+        # 状态从“即将开始/进行中”变更为“已结束”时，恢复比赛题目为公开题目
+        if status == ContestTimeConfig.STATUS_ENDED and previous_status != ContestTimeConfig.STATUS_ENDED:
+            try:
+                _restore_contest_problem_auths(time_config.contest, now)
+            except Exception:
+                # 恢复失败不影响比赛状态展示，避免整体接口报错
+                pass
+
         time_config.status = status
         time_config.save(update_fields=['status'])
 
@@ -556,12 +606,9 @@ def create_contest(request):
     if not start_time or not end_time:
         return _json_error('时间格式错误，请使用ISO格式', status=400)
     
-    # 统一转换为带时区的时间，避免 naive / aware 比较错误
-    current_tz = timezone.get_current_timezone()
-    if timezone.is_naive(start_time):
-        start_time = timezone.make_aware(start_time, current_tz)
-    if timezone.is_naive(end_time):
-        end_time = timezone.make_aware(end_time, current_tz)
+    # USE_TZ=False 时只接受 naive datetime
+    start_time = _to_naive_local(start_time)
+    end_time = _to_naive_local(end_time)
     
     if start_time >= end_time:
         return _json_error('开始时间必须早于结束时间', status=400)
@@ -595,7 +642,7 @@ def create_contest(request):
     show_testcase = data.get('show_testcase', False)
     
     # 计算状态
-    now = timezone.now()
+    now = _to_naive_local(timezone.now())
     if now < start_time:
         status = ContestTimeConfig.STATUS_UPCOMING
     elif now >= start_time and now <= end_time:
@@ -619,8 +666,16 @@ def create_contest(request):
                 start_time=start_time,
                 end_time=end_time,
                 duration=duration,
-                register_start_time=parse_datetime(data.get('register_start_time')) if data.get('register_start_time') else None,
-                register_end_time=parse_datetime(data.get('register_end_time')) if data.get('register_end_time') else None,
+                register_start_time=_to_naive_local(
+                    parse_datetime(data.get('register_start_time'))
+                )
+                if data.get('register_start_time')
+                else None,
+                register_end_time=_to_naive_local(
+                    parse_datetime(data.get('register_end_time'))
+                )
+                if data.get('register_end_time')
+                else None,
                 status=status,
             )
             
@@ -706,11 +761,8 @@ def update_contest(request, contest_id):
     if not start_time or not end_time:
         return _json_error('时间格式错误，请使用ISO格式', status=400)
 
-    current_tz = timezone.get_current_timezone()
-    if timezone.is_naive(start_time):
-        start_time = timezone.make_aware(start_time, current_tz)
-    if timezone.is_naive(end_time):
-        end_time = timezone.make_aware(end_time, current_tz)
+    start_time = _to_naive_local(start_time)
+    end_time = _to_naive_local(end_time)
 
     if start_time >= end_time:
         return _json_error('开始时间必须早于结束时间', status=400)
@@ -749,7 +801,7 @@ def update_contest(request, contest_id):
     show_testcase = data.get('show_testcase', False)
 
     # 计算状态
-    now = timezone.now()
+    now = _to_naive_local(timezone.now())
     if now < start_time:
         status = ContestTimeConfig.STATUS_UPCOMING
     elif now >= start_time and now <= end_time:
@@ -758,10 +810,14 @@ def update_contest(request, contest_id):
         status = ContestTimeConfig.STATUS_ENDED
 
     register_start_time = (
-        parse_datetime(data.get('register_start_time')) if data.get('register_start_time') else None
+        _to_naive_local(parse_datetime(data.get('register_start_time')))
+        if data.get('register_start_time')
+        else None
     )
     register_end_time = (
-        parse_datetime(data.get('register_end_time')) if data.get('register_end_time') else None
+        _to_naive_local(parse_datetime(data.get('register_end_time')))
+        if data.get('register_end_time')
+        else None
     )
 
     if register_start_time and register_end_time and register_end_time < register_start_time:
@@ -1347,7 +1403,11 @@ def get_contest_problem_detail(request, contest_id, problem_id):
             'score': problem_data.score,
             'auth': problem_data.auth,
             'author': problem.author,
-            'create_time': timezone.localtime(problem.create_time).strftime('%Y-%m-%d %H:%M:%S') if problem.create_time else None,
+            'create_time': (
+                timezone.localtime(problem.create_time).strftime('%Y-%m-%d %H:%M:%S')
+                if timezone.is_aware(problem.create_time)
+                else problem.create_time.strftime('%Y-%m-%d %H:%M:%S')
+            ) if problem.create_time else None,
         }
     )
 
