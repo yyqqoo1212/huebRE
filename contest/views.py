@@ -17,7 +17,8 @@ from .models import (
     ContestStatistics,
     ContestAnnouncement,
     ContestProblem,
-    ContestRegistration
+    ContestRegistration,
+    ContestRank,
 )
 from users.views import _json_error, _json_success, _parse_request_body, jwt_required
 
@@ -127,8 +128,9 @@ def list_contest_submissions(request, contest_id):
     if page_size < 1:
         page_size = 20
 
-    # 构建查询：限定为本比赛中的题目
+    # 构建查询：限定为本比赛提交（避免练习提交混入）
     queryset = Submission.objects.select_related('problem', 'user').filter(
+        contest_id=contest_id,
         problem_id__in=problem_ids
     )
 
@@ -1451,6 +1453,33 @@ def register_for_contest(request, contest_id):
             ContestStatistics.objects.filter(id=statistics.id).update(
                 registration_count=F('registration_count') + 1
             )
+
+            # 报名成功后创建比赛排名缓存数据（若已存在则不重复创建）
+            # 初始化 problem_status: {A: {status, time, score, tries}}
+            initial_problem_status = {}
+            for cp in ContestProblem.objects.filter(contest=contest).only('display_order'):
+                key = (cp.display_order or '').strip()
+                if not key:
+                    continue
+                initial_problem_status[key] = {
+                    'status': '未提交',
+                    'time': 0,
+                    'score': 0,
+                    'tries': 0
+                }
+
+            ContestRank.objects.get_or_create(
+                contest=contest,
+                user=user,
+                defaults={
+                    'rank': 0,
+                    'total_score': 0.0,
+                    'total_time': 0,
+                    'ac_count': 0,
+                    'submit_count': 0,
+                    'problem_status': initial_problem_status,
+                }
+            )
     except Exception as exc:
         return _json_error(f'报名失败: {str(exc)}', status=500, code='db_error')
 
@@ -1531,6 +1560,12 @@ def add_problem_to_contest(request, contest_id):
     
     try:
         with transaction.atomic():
+            # 从公共题库添加进比赛时，自动将题目权限切换为“比赛题目”
+            # 仅对公开题目做自动切换，避免误改私密题目
+            if getattr(problem_data, 'auth', None) == Problem.PUBLIC:
+                problem_data.auth = Problem.CONTEST
+                problem_data.save(update_fields=['auth'])
+
             # 自动生成 display_order（按字母顺序：A, B, C...）
             existing_problems = ContestProblem.objects.filter(contest=contest).order_by('display_order')
             if existing_problems.exists():

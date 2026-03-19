@@ -1525,24 +1525,44 @@ def submit_code(request, problem_id):
     
     # 获取当前用户
     user = request.user
-    
-    # ===== 比赛统计（提交时）=====
-    # submission_count：每次提交 +1
-    contest_ids = []
-    try:
-        from contest.models import ContestProblem
 
-        contest_ids = list(
-            ContestProblem.objects.filter(problem_id=problem.problem_id)
-            .values_list('contest_id', flat=True)
-            .distinct()
-        )
-    except Exception:
-        contest_ids = []
+    # 可选：比赛提交（强制绑定到某一场比赛，避免普通练习提交污染比赛榜单）
+    contest_id = data.get('contest_id')
+    contest_problem = None
+    if contest_id is not None:
+        try:
+            contest_id = int(contest_id)
+        except (TypeError, ValueError):
+            return _json_error('contest_id 格式错误', status=400)
+
+        try:
+            from contest.models import Contest, ContestProblem, ContestRegistration
+
+            # 比赛必须存在，且该题必须属于该比赛
+            if not Contest.objects.filter(contest_id=contest_id).exists():
+                return _json_error('比赛不存在', status=404)
+
+            contest_problem = ContestProblem.objects.filter(
+                contest_id=contest_id,
+                problem_id=problem.problem_id
+            ).only('contest_id', 'display_order').first()
+            if not contest_problem:
+                return _json_error('该题目不在本比赛中', status=400)
+
+            # 必须报名成功才允许作为比赛提交
+            if not ContestRegistration.objects.filter(
+                contest_id=contest_id,
+                user_id=user.id,
+                status=ContestRegistration.STATUS_SUCCESS
+            ).exists():
+                return _json_error('未报名或报名未成功，不能进行比赛提交', status=403)
+        except Exception:
+            return _json_error('比赛提交校验失败，请稍后重试', status=500)
 
     # 创建提交记录（初始状态为Judging）
     code_length = len(code.encode('utf-8'))
     submission = Submission.objects.create(
+        contest_id=contest_id if contest_problem else None,
         problem=problem,
         user=user,
         code=code,
@@ -1552,18 +1572,51 @@ def submit_code(request, problem_id):
         result={}
     )
 
-    # 统计自增（小事务，不影响主流程）
-    try:
-        if contest_ids:
-            from contest.models import ContestStatistics
-            with transaction.atomic():
-                for cid in contest_ids:
-                    statistics, _ = ContestStatistics.objects.get_or_create(contest_id=cid)
+    # ===== 比赛排名缓存（提交次数 + 每题 tries + 初始状态 Judging）=====
+    # - submit_count：每次提交 +1
+    # - problem_status[题号].tries：未AC前每次提交 +1，AC后不再增长
+    # - problem_status[题号].status：AC 后固定为 Accepted；否则随提交更新（含 Judging/各错误）
+    if contest_problem:
+        try:
+            from django.db import transaction
+            from django.db.models import F
+            from contest.models import ContestRank, ContestStatistics
+
+            key = (contest_problem.display_order or '').strip()
+            if key:
+                with transaction.atomic():
+                    rank_obj, _ = ContestRank.objects.select_for_update().get_or_create(
+                        contest_id=contest_id,
+                        user_id=user.id,
+                        defaults={
+                            'rank': 0,
+                            'total_score': 0.0,
+                            'total_time': 0,
+                            'ac_count': 0,
+                            'submit_count': 0,
+                            'problem_status': {}
+                        }
+                    )
+
+                    # submit_count 每次比赛提交都 +1
+                    rank_obj.submit_count = (rank_obj.submit_count or 0) + 1
+
+                    ps = rank_obj.problem_status or {}
+                    entry = ps.get(key) or {'status': '未提交', 'time': 0, 'score': 0, 'tries': 0}
+                    if entry.get('status') != 'Accepted':
+                        entry['tries'] = int(entry.get('tries') or 0) + 1
+                        entry['status'] = 'Judging'
+                    ps[key] = entry
+                    rank_obj.problem_status = ps
+                    rank_obj.save(update_fields=['submit_count', 'problem_status', 'update_time'])
+
+                    # contest_statistics.submission_count：每次比赛提交 +1
+                    statistics, _ = ContestStatistics.objects.get_or_create(contest_id=contest_id)
                     ContestStatistics.objects.filter(id=statistics.id).update(
                         submission_count=F('submission_count') + 1
                     )
-    except Exception:
-        pass
+        except Exception:
+            pass
     
     try:
         # 调用通用判题函数，使用题目的时间限制和内存限制
@@ -1657,6 +1710,56 @@ def submit_code(request, problem_id):
             'passed_tests': sum(1 for r in test_results if r.get('result', -1) == 0)
         }
         submission.save()
+
+        # ===== 比赛排名缓存（判题完成后落最终 status + AC 计数）=====
+        # - status：AC 后固定为 Accepted；否则设置为 get_status_display()
+        # - ac_count：某题第一次 AC 时 +1（同题多次AC不重复加）
+        if contest_problem:
+            try:
+                from django.db import transaction
+                from django.db.models import F
+                from contest.models import ContestRank, ContestStatistics
+
+                key = (contest_problem.display_order or '').strip()
+                if key:
+                    final_status_text = 'Accepted' if final_status == Submission.STATUS_ACCEPTED else submission.get_status_display()
+                    with transaction.atomic():
+                        rank_obj, _ = ContestRank.objects.select_for_update().get_or_create(
+                            contest_id=contest_id,
+                            user_id=user.id,
+                            defaults={
+                                'rank': 0,
+                                'total_score': 0.0,
+                                'total_time': 0,
+                                'ac_count': 0,
+                                'submit_count': 0,
+                                'problem_status': {}
+                            }
+                        )
+
+                        ps = rank_obj.problem_status or {}
+                        entry = ps.get(key) or {'status': '未提交', 'time': 0, 'score': 0, 'tries': 0}
+
+                        already_accepted = (entry.get('status') == 'Accepted')
+                        if not already_accepted:
+                            if final_status == Submission.STATUS_ACCEPTED:
+                                entry['status'] = 'Accepted'
+                                rank_obj.ac_count = int(rank_obj.ac_count or 0) + 1
+                            else:
+                                entry['status'] = final_status_text
+
+                        ps[key] = entry
+                        rank_obj.problem_status = ps
+                        rank_obj.save(update_fields=['ac_count', 'problem_status', 'update_time'])
+
+                        # contest_statistics.ac_submission_count：每次比赛 AC 提交 +1
+                        if final_status == Submission.STATUS_ACCEPTED:
+                            statistics, _ = ContestStatistics.objects.get_or_create(contest_id=contest_id)
+                            ContestStatistics.objects.filter(id=statistics.id).update(
+                                ac_submission_count=F('ac_submission_count') + 1
+                            )
+            except Exception:
+                pass
         
         # 更新题目统计
         problem_data, _ = ProblemData.objects.get_or_create(problem=problem)
@@ -1677,25 +1780,7 @@ def submit_code(request, problem_id):
         
         problem_data.save()
 
-        # ===== 比赛统计（AC提交数）=====
-        if final_status == Submission.STATUS_ACCEPTED:
-            try:
-                from contest.models import ContestProblem, ContestStatistics
-
-                contest_ids = list(
-                    ContestProblem.objects.filter(problem_id=problem.problem_id)
-                    .values_list('contest_id', flat=True)
-                    .distinct()
-                )
-                if contest_ids:
-                    with transaction.atomic():
-                        for cid in contest_ids:
-                            statistics, _ = ContestStatistics.objects.get_or_create(contest_id=cid)
-                            ContestStatistics.objects.filter(id=statistics.id).update(
-                                ac_submission_count=F('ac_submission_count') + 1
-                            )
-            except Exception:
-                pass
+        # 比赛 AC 统计已在 contest_problem 分支中处理
         
         # 更新用户统计
         user.total_submissions += 1

@@ -131,6 +131,12 @@ class Submission(models.Model):
     )
     
     submission_id = models.AutoField(primary_key=True, verbose_name='提交ID')
+    contest_id = models.IntegerField(
+        null=True,
+        blank=True,
+        db_index=True,
+        verbose_name='比赛ID(可空，空表示非比赛提交)'
+    )
     problem = models.ForeignKey(Problem, on_delete=models.CASCADE, related_name='submissions', verbose_name='题目')
     user = models.ForeignKey('users.User', on_delete=models.CASCADE, related_name='submissions', verbose_name='用户')
     code = models.TextField(verbose_name='提交代码')
@@ -148,6 +154,7 @@ class Submission(models.Model):
         verbose_name = '提交记录'
         verbose_name_plural = '提交记录'
         indexes = [
+            models.Index(fields=['contest_id'], name='submission_contest_id_idx'),
             models.Index(fields=['problem', 'user'], name='submission_problem_user_idx'),
             models.Index(fields=['status'], name='submission_status_idx'),
             models.Index(fields=['submit_time'], name='submission_time_idx'),
