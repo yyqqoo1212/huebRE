@@ -1456,17 +1456,29 @@ def register_for_contest(request, contest_id):
 
             # 报名成功后创建比赛排名缓存数据（若已存在则不重复创建）
             # 初始化 problem_status: {A: {status, time, score, tries}}
+            rule_config = getattr(contest, 'rule_config', None)
+            contest_type = getattr(rule_config, 'contest_type', None)
+
             initial_problem_status = {}
             for cp in ContestProblem.objects.filter(contest=contest).only('display_order'):
                 key = (cp.display_order or '').strip()
                 if not key:
                     continue
-                initial_problem_status[key] = {
-                    'status': '未提交',
-                    'time': 0,
-                    'score': 0,
-                    'tries': 0
-                }
+                # 暂时仅规范化 ACM 赛制的 problem_status
+                if contest_type == ContestRuleConfig.CONTEST_TYPE_ACM:
+                    initial_problem_status[key] = {
+                        'status': 'Unaccepted',
+                        'time': 0,
+                        'score': 0,
+                        'tries': 0
+                    }
+                else:
+                    initial_problem_status[key] = {
+                        'status': '未提交',
+                        'time': 0,
+                        'score': 0,
+                        'tries': 0
+                    }
 
             ContestRank.objects.get_or_create(
                 contest=contest,

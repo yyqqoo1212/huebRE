@@ -87,6 +87,7 @@ class ProblemData(models.Model):
     tag = models.TextField(blank=True, verbose_name='题目标签')
     auth = models.IntegerField(choices=Problem.AUTH_CHOICES, default=Problem.PUBLIC, verbose_name='题目权限')
     score = models.IntegerField(default=100, verbose_name='题目分数')
+    testcase_count = models.PositiveIntegerField(default=0, verbose_name='测试数据组数')
 
     class Meta:
         db_table = 'problem_data'

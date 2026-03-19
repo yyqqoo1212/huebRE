@@ -302,5 +302,3 @@ def delete_discussion(request, discussion_id):
         return _json_error(f'删除讨论失败: {str(exc)}', status=500, code='db_error')
 
     return _json_success('删除讨论成功')
-
-
