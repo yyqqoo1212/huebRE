@@ -59,7 +59,8 @@ def list_discussions(request):
     if page_size > 100:
         page_size = 100
 
-    queryset = Discussion.objects.select_related('author').all()
+    # 按发布时间（创建时间）排序：最新在前，避免置顶影响“最新”语义
+    queryset = Discussion.objects.select_related('author').order_by('-created_at')
 
     if type_filter:
         queryset = queryset.filter(type=type_filter)

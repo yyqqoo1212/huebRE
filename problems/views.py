@@ -125,8 +125,8 @@ def list_problems(request):
             # 标题搜索
             queryset = queryset.filter(title__icontains=search)
     
-    # 按题号排序
-    queryset = queryset.order_by('problem__problem_id')
+    # 按创建时间排序（最新在前）
+    queryset = queryset.order_by('-problem__create_time')
     
     # 分页
     paginator = Paginator(queryset, page_size)

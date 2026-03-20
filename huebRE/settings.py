@@ -74,6 +74,7 @@ INSTALLED_APPS = [
     'problems',
     'discussions',
     'contest',
+    'announcements.apps.AnnouncementsConfig',
 ]
 
 MIDDLEWARE = [

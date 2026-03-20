@@ -437,8 +437,8 @@ def list_contests(request):
     if status_filter:
         queryset = queryset.filter(time_config__status=status_filter)
     
-    # 按开始时间排序，越晚开始的排在前面
-    queryset = queryset.order_by('-time_config__start_time')
+    # 按比赛创建时间排序，越晚创建的排在前面
+    queryset = queryset.order_by('-create_time')
     
     # 分页
     paginator = Paginator(queryset, page_size)
@@ -461,6 +461,7 @@ def list_contests(request):
         contests.append({
             'id': contest.contest_id,
             'name': contest.contest_name,
+            'create_time': contest.create_time.isoformat() if contest.create_time else None,
             'startTime': time_config.start_time.isoformat() if time_config else None,
             'duration': time_config.duration if time_config else 0,
             'format': rule_config.contest_type if rule_config else 'ACM',

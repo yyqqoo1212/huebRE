@@ -36,6 +36,9 @@ urlpatterns = [
     # 比赛相关API
     path('api/contests/', include('contest.urls')),
 
+    # 系统公告相关API
+    path('api/announcements/', include('announcements.urls')),
+
     # Minio文件存储相关API
     path('api/files/upload', storage_views.upload_file, name='file-upload'),
     path('api/files/upload-temp', storage_views.upload_temp_file, name='file-upload-temp'),
