@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
 
+import jwt
+from django.conf import settings
+from django.core.cache import cache
 from django.db import transaction
 from django.db.models import F
 from django.views.decorators.csrf import csrf_exempt
@@ -21,6 +24,7 @@ from .models import (
     ContestRank,
 )
 from users.views import _json_error, _json_success, _parse_request_body, jwt_required
+from users.models import User
 
 
 def _to_naive_local(dt):
@@ -106,6 +110,72 @@ def _get_dynamic_status(time_config: ContestTimeConfig) -> str:
     return status
 
 
+def _check_contest_access_permission(contest: Contest, user: User):
+    """
+    报名截止后（且比赛未结束），未报名用户不可进入比赛内容页。
+    返回错误响应对象或 None。
+    """
+    if not user:
+        return _json_error('用户未登录', status=401)
+
+    # 私有赛必须先完成密码验证
+    private_access_error = _check_private_contest_password_permission(contest, user)
+    if private_access_error:
+        return private_access_error
+
+    time_config = getattr(contest, 'time_config', None)
+    if not time_config:
+        return None
+
+    current_status = _get_dynamic_status(time_config)
+    if current_status == ContestTimeConfig.STATUS_ENDED:
+        return None
+
+    register_end_time = getattr(time_config, 'register_end_time', None)
+    if not register_end_time:
+        return None
+
+    now = _to_naive_local(timezone.now())
+    register_end_time = _to_naive_local(register_end_time)
+    if now <= register_end_time:
+        return None
+
+    registered = ContestRegistration.objects.filter(
+        contest=contest,
+        user=user,
+        status=ContestRegistration.STATUS_SUCCESS
+    ).exists()
+    if registered:
+        return None
+    return _json_error('报名已截止，未报名用户在比赛结束前不可进入比赛', status=403)
+
+
+def _contest_password_cache_key(contest_id: int, user_id: int) -> str:
+    return f'contest_password_verified:{contest_id}:{user_id}'
+
+
+def _is_private_contest_mode(contest_mode) -> bool:
+    mode = str(contest_mode or '').strip().lower()
+    return mode in ['私有赛', 'private', 'private_contest']
+
+
+def _check_private_contest_password_permission(contest: Contest, user: User):
+    """
+    私有赛访问控制：未验证比赛密码时，禁止进入比赛页面与报名流程。
+    """
+    if not user:
+        return _json_error('用户未登录', status=401)
+    rule_config = getattr(contest, 'rule_config', None)
+    if not rule_config:
+        return None
+    if not _is_private_contest_mode(getattr(rule_config, 'contest_mode', ContestRuleConfig.CONTEST_MODE_PUBLIC)):
+        return None
+    verified = cache.get(_contest_password_cache_key(contest.contest_id, user.id))
+    if verified:
+        return None
+    return _json_error('私有赛需要先输入比赛密码', status=403, code='contest_password_required')
+
+
 @csrf_exempt
 @jwt_required
 @require_http_methods(['GET'])
@@ -134,6 +204,10 @@ def list_contest_submissions(request, contest_id):
         contest = Contest.objects.get(contest_id=contest_id)
     except Contest.DoesNotExist:
         return _json_error('比赛不存在', status=404)
+
+    access_error = _check_contest_access_permission(contest, request.user)
+    if access_error:
+        return access_error
 
     # 获取本场比赛关联的题目集合
     contest_problems = ContestProblem.objects.filter(contest=contest).select_related('problem')
@@ -287,9 +361,17 @@ def get_contest_rankings(request, contest_id):
         return _json_error('比赛ID格式错误', status=400)
 
     try:
-        contest = Contest.objects.select_related('rule_config').get(contest_id=contest_id)
+        contest = Contest.objects.select_related('rule_config', 'permission_config', 'time_config').get(contest_id=contest_id)
     except Contest.DoesNotExist:
         return _json_error('比赛不存在', status=404)
+
+    access_error = _check_contest_access_permission(contest, request.user)
+    if access_error:
+        return access_error
+
+    permission_config = getattr(contest, 'permission_config', None)
+    if permission_config and not permission_config.show_rank:
+        return _json_error('该比赛未开启排行榜展示', status=403)
 
     contest_type = getattr(getattr(contest, 'rule_config', None), 'contest_type', None)
     if contest_type not in [ContestRuleConfig.CONTEST_TYPE_ACM, ContestRuleConfig.CONTEST_TYPE_IOI]:
@@ -305,6 +387,10 @@ def get_contest_rankings(request, contest_id):
     base_qs = ContestRank.objects.select_related('user').filter(contest_id=contest_id)
     rankings = []
     current_user_id = getattr(request.user, 'id', None)
+    registration_name_map = dict(
+        ContestRegistration.objects.filter(contest_id=contest_id)
+        .values_list('user_id', 'real_name')
+    )
 
     if contest_type == ContestRuleConfig.CONTEST_TYPE_IOI:
         # 数据库排序：只按 total_score（降序）；total_score 相同按 user_id 保证稳定
@@ -327,10 +413,12 @@ def get_contest_rankings(request, contest_id):
                 current_rank = idx
                 prev_key = score_key
 
+            real_name = (registration_name_map.get(r.user_id) or '').strip()
+            display_name = real_name if real_name else r.user.username
             rankings.append({
                 'rank': current_rank,
                 'userId': r.user.id,
-                'username': r.user.username,
+                'username': display_name,
                 'totalScore': float(r.total_score or 0),
                 'totalTime': 0,
                 'solved': int(r.ac_count or 0),
@@ -358,10 +446,12 @@ def get_contest_rankings(request, contest_id):
                 current_rank = idx
                 prev_key = key
 
+            real_name = (registration_name_map.get(r.user_id) or '').strip()
+            display_name = real_name if real_name else r.user.username
             rankings.append({
                 'rank': current_rank,
                 'userId': r.user.id,
-                'username': r.user.username,
+                'username': display_name,
                 'totalScore': 0,
                 'totalTime': int(r.total_time or 0),
                 'solved': int(r.ac_count or 0),
@@ -395,6 +485,7 @@ def list_contests(request):
     format_filter = request.GET.get('format')
     type_filter = request.GET.get('type')
     status_filter = request.GET.get('status')
+    include_hidden = (request.GET.get('include_hidden', 'false') or '').lower() in ('1', 'true', 'yes')
 
     try:
         page = int(raw_page)
@@ -412,10 +503,29 @@ def list_contests(request):
     if page_size < 1:
         page_size = 20
     
-    # 构建查询
+    # 构建查询：
+    # 默认只返回可见比赛；仅当 include_hidden=true 且当前用户是管理员时才返回全部比赛
     queryset = Contest.objects.select_related(
         'time_config', 'rule_config', 'permission_config', 'statistics'
-    ).filter(permission_config__visibility=True)
+    )
+    is_admin_user = False
+    auth_header = request.META.get('HTTP_AUTHORIZATION', '')
+    if auth_header.startswith('Bearer '):
+        token = auth_header.split(' ')[1] if len(auth_header.split(' ')) > 1 else ''
+        if token:
+            try:
+                payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+                user_id = payload.get('user_id')
+                if user_id:
+                    user = User.objects.filter(id=user_id).only('permission').first()
+                    user_permission = int(getattr(user, 'permission', 0) or 0)
+                    is_admin_user = user_permission in [1, 2]
+            except Exception:
+                # token 无效或过期时，按匿名用户处理，仅返回可见比赛
+                is_admin_user = False
+
+    if not (include_hidden and is_admin_user):
+        queryset = queryset.filter(permission_config__visibility=True)
     
     # 搜索筛选（比赛号或名称）
     if search:
@@ -1292,10 +1402,39 @@ def get_contest_problems(request, contest_id):
         return _json_error('比赛ID格式错误', status=400)
     
     try:
-        contest = Contest.objects.get(contest_id=contest_id)
+        contest = Contest.objects.select_related('time_config').get(contest_id=contest_id)
     except Contest.DoesNotExist:
         return _json_error('比赛不存在', status=404)
-    
+
+    # 尝试从 Authorization 中解析当前用户（无 token 时按未登录处理）
+    current_user = None
+    try:
+        auth_header = request.META.get('HTTP_AUTHORIZATION', '')
+        if auth_header and auth_header.startswith('Bearer '):
+            token = auth_header.split(' ', 1)[1].strip()
+            if token:
+                payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+                user_id = payload.get('user_id')
+                if user_id:
+                    current_user = User.objects.filter(id=user_id).first()
+    except Exception:
+        current_user = None
+
+    access_error = _check_contest_access_permission(contest, current_user)
+    if access_error:
+        return access_error
+
+    accepted_problem_ids = set()
+    if current_user:
+        from problems.models import Submission
+        accepted_problem_ids = set(
+            Submission.objects.filter(
+                contest_id=contest_id,
+                user_id=current_user.id,
+                status=Submission.STATUS_ACCEPTED
+            ).values_list('problem_id', flat=True).distinct()
+        )
+
     # 获取该比赛的所有题目，按display_order排序；select_related 避免 N+1
     problems = ContestProblem.objects.filter(contest=contest).select_related('problem').order_by('display_order')
     
@@ -1310,6 +1449,7 @@ def get_contest_problems(request, contest_id):
             'score': problem.score,
             'accept_count': problem.accept_count,
             'submit_count': problem.submit_count,
+            'is_accepted': bool(problem.problem_id in accepted_problem_ids),
         })
     
     return _json_success(
@@ -1338,9 +1478,25 @@ def get_contest_problem_detail(request, contest_id, problem_id):
         return _json_error('ID格式错误', status=400)
 
     try:
-        contest = Contest.objects.get(contest_id=contest_id)
+        contest = Contest.objects.select_related('time_config').get(contest_id=contest_id)
     except Contest.DoesNotExist:
         return _json_error('比赛不存在', status=404)
+
+    current_user = None
+    try:
+        auth_header = request.META.get('HTTP_AUTHORIZATION', '')
+        if auth_header and auth_header.startswith('Bearer '):
+            token = auth_header.split(' ', 1)[1].strip()
+            if token:
+                payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+                user_id = payload.get('user_id')
+                if user_id:
+                    current_user = User.objects.filter(id=user_id).first()
+    except Exception:
+        current_user = None
+    access_error = _check_contest_access_permission(contest, current_user)
+    if access_error:
+        return access_error
 
     try:
         contest_problem = ContestProblem.objects.select_related('problem', 'problem__stat').get(
@@ -1518,9 +1674,13 @@ def get_contest_registration(request, contest_id):
         return _json_error('用户未登录', status=401)
 
     try:
-        contest = Contest.objects.get(contest_id=contest_id)
+        contest = Contest.objects.select_related('rule_config').get(contest_id=contest_id)
     except Contest.DoesNotExist:
         return _json_error('比赛不存在', status=404)
+
+    private_access_error = _check_private_contest_password_permission(contest, user)
+    if private_access_error:
+        return private_access_error
 
     registration = ContestRegistration.objects.filter(contest=contest, user=user).first()
     if not registration:
@@ -1542,6 +1702,61 @@ def get_contest_registration(request, contest_id):
             'register_time': registration.register_time.isoformat() if registration.register_time else None,
         }
     })
+
+
+@csrf_exempt
+@jwt_required
+@require_http_methods(['POST'])
+def verify_contest_password(request, contest_id):
+    """
+    私有赛密码校验
+
+    POST /api/contests/<contest_id>/password/verify
+    """
+    try:
+        contest_id = int(contest_id)
+    except (TypeError, ValueError):
+        return _json_error('比赛ID格式错误', status=400)
+
+    user = request.user
+    if not user:
+        return _json_error('用户未登录', status=401)
+
+    try:
+        contest = Contest.objects.select_related('rule_config', 'time_config').get(contest_id=contest_id)
+    except Contest.DoesNotExist:
+        return _json_error('比赛不存在', status=404)
+
+    rule_config = getattr(contest, 'rule_config', None)
+    if not rule_config or not _is_private_contest_mode(rule_config.contest_mode):
+        return _json_success('公开赛无需密码', data={'verified': True})
+
+    try:
+        data = _parse_request_body(request)
+    except ValueError as exc:
+        return _json_error(str(exc), status=400, code='bad_json')
+
+    input_password = (data.get('password') or '').strip()
+    contest_password = (rule_config.password or '').strip()
+    if not input_password:
+        return _json_error('比赛密码不能为空', status=400)
+    if not contest_password:
+        return _json_error('该私有赛暂未配置密码，请联系管理员', status=500)
+    if input_password != contest_password:
+        return _json_error('比赛密码错误', status=403, code='contest_password_invalid')
+
+    # 缓存验证状态：最长 24 小时，且不超过比赛结束时间
+    ttl_seconds = 24 * 60 * 60
+    time_config = getattr(contest, 'time_config', None)
+    if time_config and time_config.end_time:
+        now = _to_naive_local(timezone.now())
+        end_time = _to_naive_local(time_config.end_time)
+        delta = int((end_time - now).total_seconds())
+        if delta > 0:
+            ttl_seconds = min(ttl_seconds, delta)
+
+    cache.set(_contest_password_cache_key(contest_id, user.id), True, timeout=max(60, ttl_seconds))
+    return _json_success('比赛密码验证成功', data={'verified': True})
 
 
 @csrf_exempt
@@ -1573,9 +1788,24 @@ def register_for_contest(request, contest_id):
         return _json_error('用户未登录', status=401)
 
     try:
-        contest = Contest.objects.get(contest_id=contest_id)
+        contest = Contest.objects.select_related('time_config', 'rule_config').get(contest_id=contest_id)
     except Contest.DoesNotExist:
         return _json_error('比赛不存在', status=404)
+
+    private_access_error = _check_private_contest_password_permission(contest, user)
+    if private_access_error:
+        return private_access_error
+
+    # 报名时间窗口校验
+    time_config = getattr(contest, 'time_config', None)
+    if time_config:
+        now = _to_naive_local(timezone.now())
+        register_start_time = _to_naive_local(getattr(time_config, 'register_start_time', None))
+        register_end_time = _to_naive_local(getattr(time_config, 'register_end_time', None))
+        if register_start_time and now < register_start_time:
+            return _json_error('报名尚未开始', status=403)
+        if register_end_time and now > register_end_time:
+            return _json_error('报名已截止', status=403)
 
     # 已报名则直接返回成功，避免重复报错
     existing = ContestRegistration.objects.filter(contest=contest, user=user).first()

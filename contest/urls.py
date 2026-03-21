@@ -35,6 +35,7 @@ urlpatterns = [
 
     # 比赛报名
     path('<int:contest_id>/registration', views.get_contest_registration, name='contest-registration-get'),
+    path('<int:contest_id>/password/verify', views.verify_contest_password, name='contest-password-verify'),
     path('<int:contest_id>/registration/apply', views.register_for_contest, name='contest-registration-post'),
 
     # 比赛提交记录

@@ -276,3 +276,44 @@ python manage.py dbshell
 2. **启用 Nginx 缓存**: 对静态资源启用缓存
 3. **数据库优化**: 添加适当的索引
 4. **使用 CDN**: 对静态文件使用 CDN
+
+```
+1. 只改前端（Vue）如何重新部署
+在本机更新前端代码后，确保 huebOJ/.env.production 里的 API 仍是公网地址（你现在应该是）：
+VUE_APP_API_BASE_URL=http://101.42.172.229/api
+重新打包：
+cd huebOJ
+npm ci
+npm run build
+上传构建产物到服务器（覆盖即可）：
+scp -r huebOJ/dist 你的用户名@101.42.172.229:/var/www/huebOJ
+在服务器上把 dist 内容放到 Nginx root 目录（如果你当前是根目录直接放 index.html，就要保持一致）：
+最推荐做法：把 /var/www/huebOJ 变成“就是静态文件根目录”
+sudo rm -rf /var/www/huebOJ/*
+sudo cp -r /var/www/huebOJ/dist/* /var/www/huebOJ/ 2>/dev/null || true
+如果你上传时就是直接覆盖到 /var/www/huebOJ 的静态根目录，那就不用上面那行“dist/*复制”，只要确保 index.html 在 /var/www/huebOJ/index.html。
+重载 Nginx：
+sudo systemctl reload nginx
+验证访问：
+浏览器刷新首页 http://101.42.172.229/
+随便点一个需要请求的页面，确认接口仍通。
+2. 只改后端（Django）如何重新部署
+把更新后的后端代码上传到服务器对应目录（你现在用的是 /opt/huebRE）：
+scp -r huebRE/ 你的用户名@101.42.172.229:/opt/
+确保代码落在：/opt/huebRE/...（和你的 systemd WorkingDirectory=/opt/huebRE 对齐）。
+进入虚拟环境，安装依赖（只有依赖变了才必须做；但通常你可以直接做一遍）：
+cd /opt/huebRE
+source venv/bin/activate
+pip install -r requirements.txt
+如果你改了数据库模型/迁移文件，执行迁移：
+python manage.py migrate
+重启后端服务（生效关键）：
+sudo systemctl restart huebRE
+sudo systemctl status huebRE --no-pager
+验证接口：
+curl -i http://127.0.0.1:8000/api/users/ranking
+curl -i http://101.42.172.229/api/users/ranking
+3. 同时改前后端（最省事顺序）
+先部署后端（migrate/重启先保证接口存在）
+再部署前端（重新 build 并覆盖 dist）
+```

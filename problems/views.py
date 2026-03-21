@@ -125,8 +125,8 @@ def list_problems(request):
             # 标题搜索
             queryset = queryset.filter(title__icontains=search)
     
-    # 按创建时间排序（最新在前）
-    queryset = queryset.order_by('-problem__create_time')
+    # 统一按题号倒序排序（题号越大越新）
+    queryset = queryset.order_by('-problem__problem_id')
     
     # 分页
     paginator = Paginator(queryset, page_size)
@@ -1566,16 +1566,28 @@ def submit_code(request, problem_id):
 
         try:
             from contest.models import Contest, ContestProblem, ContestRegistration, ContestRuleConfig, ContestTimeConfig
+            from django.utils import timezone
 
             # 比赛必须存在，且该题必须属于该比赛
             contest_obj = Contest.objects.select_related('rule_config', 'time_config').filter(contest_id=contest_id).first()
             if not contest_obj:
                 return _json_error('比赛不存在', status=404)
 
+            # 比赛结束后是否允许继续提交（由 allow_submit_after_end 控制）
+            tc = getattr(contest_obj, 'time_config', None)
+            rc = getattr(contest_obj, 'rule_config', None)
+            if tc and tc.end_time:
+                now = timezone.now()
+                end_time = tc.end_time
+                if timezone.is_naive(end_time):
+                    end_time = timezone.make_aware(end_time, timezone.get_current_timezone())
+                if now > end_time and not bool(getattr(rc, 'allow_submit_after_end', False)):
+                    return _json_error('比赛已结束，当前不允许继续提交', status=403)
+
             contest_problem = ContestProblem.objects.filter(
                 contest_id=contest_id,
                 problem_id=problem.problem_id
-            ).only('contest_id', 'display_order').first()
+            ).only('id', 'contest_id', 'display_order').first()
             if not contest_problem:
                 return _json_error('该题目不在本比赛中', status=400)
 
@@ -1632,7 +1644,7 @@ def submit_code(request, problem_id):
         try:
             from django.db import transaction
             from django.db.models import F
-            from contest.models import ContestRank, ContestStatistics
+            from contest.models import ContestRank, ContestStatistics, ContestProblem
 
             key = (contest_problem.display_order or '').strip()
             if key:
@@ -1676,6 +1688,10 @@ def submit_code(request, problem_id):
                     statistics, _ = ContestStatistics.objects.get_or_create(contest_id=contest_id)
                     ContestStatistics.objects.filter(id=statistics.id).update(
                         submission_count=F('submission_count') + 1
+                    )
+                    # contest_problem.submit_count：每次比赛提交 +1
+                    ContestProblem.objects.filter(id=contest_problem.id).update(
+                        submit_count=F('submit_count') + 1
                     )
         except Exception:
             pass
@@ -1780,7 +1796,7 @@ def submit_code(request, problem_id):
             try:
                 from django.db import transaction
                 from django.db.models import F
-                from contest.models import ContestRank, ContestStatistics
+                from contest.models import ContestRank, ContestStatistics, ContestProblem
 
                 key = (contest_problem.display_order or '').strip()
                 if key:
@@ -1889,6 +1905,11 @@ def submit_code(request, problem_id):
                             statistics, _ = ContestStatistics.objects.get_or_create(contest_id=contest_id)
                             ContestStatistics.objects.filter(id=statistics.id).update(
                                 ac_submission_count=F('ac_submission_count') + 1
+                            )
+                        # contest_problem.accept_count：每次 AC 提交都 +1
+                        if final_status == Submission.STATUS_ACCEPTED:
+                            ContestProblem.objects.filter(id=contest_problem.id).update(
+                                accept_count=F('accept_count') + 1
                             )
             except Exception:
                 pass
